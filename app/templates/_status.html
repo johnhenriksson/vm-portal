@@ -1,0 +1,7 @@
+{% macro badge(status) -%}
+<span class="badge {{ status }}">{{ status }}</span>
+{%- endmacro %}
+
+{% macro power(state) -%}
+<span class="power {{ state }}">{{ {"poweredOn": "On", "poweredOff": "Off", "suspended": "Suspended", "missing": "Missing", "unknown": "Unknown"}.get(state, state) }}</span>
+{%- endmacro %}

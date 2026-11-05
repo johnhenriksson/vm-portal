@@ -1,0 +1,36 @@
+# Image definition manifest: how vm-portal builds and uses this image.
+# See images/README.md for the contract between the portal and definitions.
+name: Ubuntu 26.04 LTS + Docker
+description: >-
+  Ubuntu Server 26.04 with Docker Engine and Compose, open-vm-tools and
+  cloud-init. Root volume grows to the VM's disk on boot.
+os:
+  family: linux
+  distro: ubuntu
+  version: "26.04"
+guest: cloud-init          # how clones are configured (hostname, network, keys)
+features: [docker]         # enables the compose.yaml option when creating VMs
+template_prefix: ubuntu-2604-docker
+login_user_parameter: ssh_username
+build:
+  cpus: 2
+  memory_mb: 2048
+  disk_mb: 25600
+iso:
+  hint: Ubuntu 26.04 live server ISO (amd64)
+  match: "ubuntu-26.04*live-server-amd64.iso"
+parameters:
+  - name: ssh_username
+    label: Login user
+    help: User created in the template; VMs get their SSH keys for it.
+    default: ubuntu
+    pattern: "^[a-z_][a-z0-9_-]{0,31}$"
+  - name: keyboard_layout
+    label: Keyboard layout
+    help: XKB layout code for the console, e.g. us, se, de.
+    default: us
+    pattern: "^[a-z]{2,3}$"
+  - name: locale
+    label: Locale
+    default: en_US.UTF-8
+    pattern: "^[a-z]{2,3}_[A-Z]{2}\\.UTF-8$"

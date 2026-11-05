@@ -1,0 +1,11 @@
+# Providers are baked into the image, so VM jobs never download from a registry.
+# registry.terraform.io covers state written by Terraform before the switch to OpenTofu.
+provider_installation {
+  filesystem_mirror {
+    path    = "/opt/tofu-mirror"
+    include = ["registry.opentofu.org/vmware/vsphere", "registry.terraform.io/vmware/vsphere"]
+  }
+  direct {
+    exclude = ["registry.opentofu.org/vmware/vsphere", "registry.terraform.io/vmware/vsphere"]
+  }
+}

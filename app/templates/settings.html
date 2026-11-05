@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Settings · VM Portal{% endblock %}
+
+{% from "_fields.html" import field %}
+
+{% block content %}
+<div class="page-head"><div><h1>Settings</h1></div></div>
+
+<nav class="tabs">
+  {% for key, label in tabs %}
+  <a href="/settings/{{ key }}" class="{{ 'active' if key == section }}">{{ label }}</a>
+  {% endfor %}
+</nav>
+
+{% if importable and section not in ("users", "audit") %}
+<div class="alert warn row" style="justify-content:space-between">
+  <span>{{ importable | length }} setting(s) come from environment variables and can't be edited here.
+    Save them to the portal's encrypted settings, then remove them from the environment.</span>
+  <form method="post" action="/settings/import-env" data-confirm="Copy {{ importable | length }} value(s) from the environment into the portal's settings?">
+    {{ csrf_field(request) }}<button class="btn-outline btn-sm">Import from environment</button></form>
+</div>
+{% endif %}
+
+{% if fields %}
+<form method="post" action="/settings/{{ section }}" class="settings-form">
+  {{ csrf_field(request) }}
+  {% if section == "vcenter" %}
+    {% include "_vcenter_form.html" %}
+  {% elif section == "templates" %}
+    <p class="muted">Each image's ISO, sizes and parameters are set on its page under
+      <a href="/images?tab=definitions">Images → Image definitions</a>.</p>
+    <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
+  {% elif section == "network" %}
+    <p class="muted">Static IPs are offered from this pool. Leave the pool empty to only allow DHCP.</p>
+    <div class="grid-2">{% for f in fields[:-1] %}{{ field(f) }}{% endfor %}</div>
+    {{ field(fields[-1]) }}
+  {% else %}
+    <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
+  {% endif %}
+  <div class="row form-actions">
+    <button type="submit">Save</button>
+  </div>
+</form>
+{% endif %}
+
+{% if section == "templates" and build_key %}
+<div class="card" style="max-width:52rem;margin-top:2rem">
+  <div class="card-head">Build SSH key</div>
+  <div class="card-body">
+    <p class="muted">Packer logs in to the build VM with this key. It's removed from the template at the end
+      of the build, so VMs never get it.
+      {% if build_key.generated %}The portal generated it; the private key stays in the data volume.
+      {% else %}It comes from <code>{{ build_key.path }}</code>.{% endif %}</p>
+    {% if build_key.error %}
+      <div class="alert">Can't read the build key: {{ build_key.error }}</div>
+    {% else %}
+      <label class="field"><span class="label">Public key</span>
+        <input type="text" class="mono" readonly value="{{ build_key.public }}">
+        <span class="hint">Fingerprint {{ build_key.fingerprint }}</span></label>
+    {% endif %}
+    {% if build_key.generated %}
+    <form method="post" action="/settings/templates/regenerate-key"
+          data-confirm="Generate a new build key? Existing templates and VMs are not affected.">
+      {{ csrf_field(request) }}<button class="btn-outline btn-sm">Regenerate key</button></form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if section == "ssh-keys" %}
+<p class="muted">These public keys are added to the login user of <strong>every</strong> new VM, including VMs other users create.
+  Templates contain no keys, so this list (plus the keys added when creating a VM) is how anyone gets SSH access.</p>
+<div class="checklist" style="margin-bottom:1.5rem">
+  <div class="head">Default keys <span class="count">{{ keys | length }}</span></div>
+  {% for k in keys %}
+  <div>
+    <strong>{{ k.comment or "unnamed key" }}</strong>
+    <span class="key">{{ k.type }} …{{ k.short }}</span>
+    {% if "default_ssh_keys" not in locked %}
+    <form method="post" action="/settings/ssh-keys/{{ k.id }}/delete" style="margin-left:auto" data-confirm="Remove {{ k.comment or 'this key' }}? Existing VMs keep it.">
+      {{ csrf_field(request) }}<button class="link-btn danger">Remove</button></form>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="muted">No default keys. Users must add their own key when creating a VM.</div>
+  {% endfor %}
+</div>
+{% if "default_ssh_keys" not in locked %}
+<form method="post" action="/settings/ssh-keys/add" class="card">
+  <div class="card-head">Add SSH key</div>
+  <div class="card-body">
+    {{ csrf_field(request) }}
+    <label class="field"><span class="label">Public key</span>
+      <textarea name="key" rows="3" class="mono" required placeholder="ssh-ed25519 AAAA… you@laptop"></textarea>
+      <span class="hint">One per line. Only public keys (the <code>.pub</code> file).</span></label>
+    <button type="submit">Add key</button>
+  </div>
+</form>
+{% else %}<p class="hint lock">Set by the environment (DEFAULT_SSH_KEYS)</p>{% endif %}
+{% endif %}
+
+{% if section == "users" %}
+<div class="table-wrap" style="margin-bottom:2rem">
+<table>
+  <thead><tr><th>User</th><th>Role</th><th>VMs</th><th>Last login</th><th></th></tr></thead>
+  <tbody>
+  {% for u in users %}
+    <tr>
+      <td><strong>{{ u.username }}</strong>{% if u.id == current_user.id %} <span class="muted">(you)</span>{% endif %}
+        {% if u.disabled %} <span class="badge failed plain">Disabled</span>{% endif %}</td>
+      <td>{% if u.role == "admin" %}<span class="badge default plain">Admin</span>{% else %}<span class="muted">User</span>{% endif %}</td>
+      <td>{{ u.vm_count }}</td>
+      <td class="muted">{{ (u.last_login_at or "never")[:16] | replace("T", " ") }}</td>
+      <td class="right">
+        {% if u.id != current_user.id %}
+        <details class="menu">
+          <summary>More</summary>
+          <div class="menu-list" style="min-width:260px">
+            <form method="post" action="/settings/users/{{ u.id }}/role">{{ csrf_field(request) }}
+              <input type="hidden" name="role" value="{{ 'user' if u.role == 'admin' else 'admin' }}">
+              <button>{{ "Make regular user" if u.role == "admin" else "Make admin" }}</button></form>
+            <form method="post" action="/settings/users/{{ u.id }}/disable">{{ csrf_field(request) }}
+              <button>{{ "Enable" if u.disabled else "Disable" }}</button></form>
+            <hr>
+            <form method="post" action="/settings/users/{{ u.id }}/password" class="menu-form">{{ csrf_field(request) }}
+              <span class="label">Set new password</span>
+              <input type="password" name="password" required minlength="12" maxlength="256" autocomplete="new-password">
+              <button class="btn-sm btn-outline">Set password</button></form>
+            <hr>
+            <form method="post" action="/settings/users/{{ u.id }}/delete" data-confirm="Delete user {{ u.username }}?">{{ csrf_field(request) }}
+              <button class="danger">Delete</button></form>
+          </div>
+        </details>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<form method="post" action="/settings/users" class="card" style="max-width:40rem">
+  <div class="card-head">Add user</div>
+  <div class="card-body">
+    {{ csrf_field(request) }}
+    <div class="grid-2">
+      <label class="field"><span class="label">Username</span>
+        <input name="username" value="{{ new_username or '' }}" required maxlength="32" autocomplete="off"
+               autocapitalize="none" spellcheck="false"></label>
+      <label class="field"><span class="label">Role</span>
+        <select name="role"><option value="user">User: own VMs only</option><option value="admin">Admin: everything</option></select></label>
+    </div>
+    <label class="field"><span class="label">Initial password</span>
+      <input type="password" name="password" required minlength="12" maxlength="256" autocomplete="new-password">
+      <span class="hint">At least 12 characters. Share it securely; they can change it under Account.</span></label>
+    <button type="submit">Add user</button>
+  </div>
+</form>
+{% endif %}
+
+{% if section == "audit" %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Time (UTC)</th><th>User</th><th>Action</th><th>Detail</th><th>IP</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+    <tr>
+      <td class="muted">{{ e.ts[:19] | replace("T", " ") }}</td>
+      <td>{{ e.username or "–" }}</td>
+      <td><code>{{ e.action }}</code></td>
+      <td>{{ e.detail }}</td>
+      <td class="mono muted">{{ e.ip or "" }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="empty">Nothing logged yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% from "_template_age.html" import age %}
+{% from "_icons.html" import os_icon %}
+{% from "_status.html" import badge %}
+{% block title %}Images · VM Portal{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Images</h1><p class="sub">Templates in vCenter, and the image definitions the portal builds them from.</p></div>
+</div>
+
+<nav class="tabs">
+  <a href="/images" class="{{ 'active' if tab == 'templates' }}">Templates</a>
+  <a href="/images?tab=definitions" class="{{ 'active' if tab == 'definitions' }}">Image definitions ({{ defs | length }})</a>
+  <a href="/images?tab=builds" class="{{ 'active' if tab == 'builds' }}">Builds</a>
+</nav>
+
+{% if tab == "builds" %}
+  {% with jobs=builds %}{% include "_jobs_table.html" %}{% endwith %}
+
+{% elif tab == "definitions" %}
+  {% if shared_problems %}
+  <div class="alert warn"><strong>Builds can't run yet:</strong>
+    <ul>{% for p in shared_problems %}<li>{{ p }}</li>{% endfor %}</ul></div>
+  {% endif %}
+  <div class="def-grid">
+  {% for d in defs %}
+    {% set m = d.img.manifest %}
+    <div class="card def-card">
+      <div class="card-body">
+        <div class="name-cell">
+          {{ os_icon(m.os.distro if m else "") }}
+          <div>
+            <a class="title" href="/images/defs/{{ d.img.id }}">{{ m.name if m else d.img.id }}</a>
+            <span class="meta">{{ d.img.id }} · {{ "built-in" if d.img.builtin else "custom" }}{% if m %} · {{ m.guest }}{% endif %}</span>
+          </div>
+        </div>
+        {% if m %}<p class="muted def-desc">{{ m.description }}</p>{% endif %}
+        {% if d.building %}<p><span class="badge running">Building</span></p>
+        {% elif d.problems %}<p class="hint lock">{{ d.problems[0] }}</p>
+        {% elif d.cfg and not d.cfg.enabled %}<p class="muted">Disabled</p>
+        {% else %}<p class="hint">Ready to build{% if d.last %} · last build {{ badge(d.last.status) }}{% endif %}</p>{% endif %}
+      </div>
+      <div class="def-actions">
+        <a href="/images/defs/{{ d.img.id }}" class="btn btn-outline btn-sm">Configure</a>
+        <a href="/images/defs/{{ d.img.id }}/files" class="btn btn-ghost btn-sm">{{ "Edit files" if (not d.img.builtin and editing_enabled) else "View files" }}</a>
+        {% if m and not d.problems and not d.building %}
+        <form method="post" action="/images/defs/{{ d.img.id }}/build" data-confirm="Build a new {{ m.name }} template? It takes a while.">
+          {{ csrf_field(request) }}<button class="btn-sm">Build</button></form>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    <div class="empty-state"><p>No image definitions found.</p></div>
+  {% endfor %}
+  </div>
+  <div class="info-panel">
+    <h3>Adding images</h3>
+    <div class="cols">
+      <div><strong class="label" style="color:var(--blue)">Definitions</strong>
+        <p>Each image is a Packer template plus an <code>image.yaml</code> manifest: OS, guest setup, template prefix and settings.</p></div>
+      <div><strong class="label" style="color:var(--blue)">Custom images</strong>
+        <p>{% if editing_enabled %}Open a definition and use <em>Duplicate</em> to start a custom one you can edit here.
+          {% else %}Editing in the browser is off. Set <code>ALLOW_IMAGE_EDITING=true</code> to allow admins to create and edit definitions.{% endif %}</p></div>
+      <div><strong class="label" style="color:var(--blue)">Templates</strong>
+        <p>Every build creates a new dated template; the newest is the default for new VMs and old ones are pruned.</p></div>
+    </div>
+  </div>
+
+{% else %}
+  {% for g in groups %}
+  <div class="section" style="margin-top:{{ '0' if loop.first else '2rem' }}">
+    <div class="section-head"><h2>{{ g.image.manifest.name if g.image else "Other templates" }}</h2>
+      {% if g.image %}<a href="/images/defs/{{ g.image.id }}">Image settings</a>{% endif %}</div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Template</th><th>Built</th><th>Age</th><th>Notes</th><th></th></tr></thead>
+      <tbody>
+      {% for t in g.templates %}
+        <tr>
+          <td><div class="name-cell">{{ os_icon(g.image.manifest.os.distro if g.image else "") }}
+            <span class="title plain">{{ t.name }}</span></div></td>
+          <td>{{ t.created.strftime("%Y-%m-%d %H:%M") if t.created else "–" }}</td>
+          <td>{{ age(t, settings.template_max_age_days) }}</td>
+          <td>{% if loop.first %}<span class="badge default plain">Default</span>{% else %}<span class="muted">Older version</span>{% endif %}</td>
+          <td class="right">
+            {% if not loop.first %}
+            <details class="menu"><summary>More</summary>
+              <div class="menu-list">
+                <form method="post" action="/images/templates/{{ t.name | urlencode }}/delete" data-confirm="Delete template {{ t.name }}?">
+                  {{ csrf_field(request) }}<button class="danger">Delete</button></form>
+              </div></details>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="empty-state"><h3>No templates yet</h3>
+    <p>Build one from an image definition.</p>
+    <a href="/images?tab=definitions" class="btn">Image definitions</a></div>
+  {% endfor %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,15 @@
+{% if error %}
+  <div class="alert" role="alert">{{ error }}</div>
+{% elif result.free %}
+  <div class="chips">
+  {% for ip in result.free[:8] %}
+    <button type="button" class="chip" data-fill-ip="{{ ip }}">{{ ip }}</button>
+  {% endfor %}
+  </div>
+  <details class="plain">
+    <summary>{{ result.free | length }} free, {{ result.used | length }} in use</summary>
+    <ul>{% for ip, why in result.used.items() %}<li><span class="mono">{{ ip }}</span> {{ why }}</li>{% endfor %}</ul>
+  </details>
+{% else %}
+  <div class="alert" role="alert">No free IPs in the pool ({{ result.used | length }} in use).</div>
+{% endif %}

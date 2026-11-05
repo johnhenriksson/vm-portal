@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ vm.name }} · Console</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/console.js"></script>
+</head>
+<body class="console-body">
+  <header class="console-bar">
+    <a href="/vms/{{ vm.name }}" class="console-title">{{ vm.name }}</a>
+    <span id="console-status" class="badge queued">Connecting</span>
+    <span class="muted small">{% if vm.console_login %}Log in as <code>{{ (vm.vm_user or settings.vm_user) }}</code> with the console password{% else %}No console password: view only{% endif %}</span>
+    <span class="console-spacer"></span>
+    <button type="button" class="btn-sm btn-secondary" data-action="paste" title="Type text into the VM">Paste text</button>
+    <button type="button" class="btn-sm btn-secondary" data-action="cad">Ctrl+Alt+Del</button>
+    <button type="button" class="btn-sm btn-secondary" data-action="scale" aria-pressed="true">Fit to window</button>
+    <button type="button" class="btn-sm btn-secondary" data-action="fullscreen">Fullscreen</button>
+    <button type="button" class="btn-sm" data-action="reconnect" hidden>Reconnect</button>
+  </header>
+  <main id="screen" class="console-screen" data-ws="/vms/{{ vm.name }}/console/ws"></main>
+  <dialog id="paste-dialog" class="console-dialog">
+    <form method="dialog">
+      <h2>Paste text</h2>
+      <p class="muted">Typed into the VM as keystrokes. Useful because the clipboard isn't shared.</p>
+      <textarea id="paste-text" rows="5" class="mono" maxlength="4000"></textarea>
+      <div class="row" style="justify-content:flex-end;margin-top:1rem">
+        <button value="cancel" class="btn-secondary">Cancel</button>
+        <button value="type" id="paste-go">Type it</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

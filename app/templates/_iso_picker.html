@@ -1,0 +1,17 @@
+{% if isos %}
+<label class="field"><span class="label">Installer ISO</span>
+  <select name="iso_url">
+    <option value="" {% if not value %}selected{% endif %}>Choose an ISO…</option>
+    {% if value and value not in isos %}<option value="{{ value }}" selected>{{ value }} (not found)</option>{% endif %}
+    {% for path in isos %}<option value="{{ path }}" {% if path == value %}selected{% endif %}>{{ path }}</option>{% endfor %}
+  </select>
+  <span class="hint">{{ hint ~ ". " if hint }}ISO files on the datastores of the configured cluster.</span>
+</label>
+{% else %}
+<label class="field"><span class="label">Installer ISO</span>
+  <input type="text" name="iso_url" value="{{ value }}" class="mono" autocomplete="off" placeholder="[datastore1] ISO/installer.iso">
+  {% if error_text %}<span class="hint lock">Couldn't list ISO files: {{ error_text }}</span>
+  {% elif isos is not none %}<span class="hint">No ISO files found on the cluster's datastores. {{ hint }}</span>
+  {% else %}<span class="hint">{{ hint }}</span>{% endif %}
+</label>
+{% endif %}

@@ -1,0 +1,44 @@
+{% from "_status.html" import badge, power %}
+{% from "_icons.html" import ubuntu %}
+<div id="vm-table" hx-get="/partials/vms" hx-trigger="every 10s" hx-swap="outerHTML">
+  {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+  {% if vms %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th>Status</th><th>Power</th><th>IP address</th><th>Size</th><th></th></tr></thead>
+    <tbody>
+    {% for vm in vms %}
+      <tr>
+        <td><div class="name-cell">{{ ubuntu() }}
+          <div><a class="title" href="/vms/{{ vm.name }}">{{ vm.name }}</a>
+               <span class="meta">{{ vm.template }}{% if vm.owner %} · {{ vm.owner }}{% endif %}</span></div></div></td>
+        <td>{{ badge(vm.status) }}{% if vm.busy and vm.status == "ready" %} <span class="muted" aria-busy="true"></span>{% endif %}</td>
+        <td>{{ power(vm.power_state) }}</td>
+        <td>{% if vm.live_ip %}<span class="mono">{{ vm.live_ip }}</span>{% else %}<span class="faint">–</span>{% endif %}
+            <span class="meta small muted" style="display:block">{{ "Static" if vm.ip_mode == "static" else "DHCP" }}</span></td>
+        <td>{{ vm.cpus }} vCPU / {{ (vm.memory_mb / 1024) | round(1) | replace(".0", "") }} GB
+            <span class="small muted" style="display:block">{{ vm.disk_gb }} GB disk</span></td>
+        <td class="right">
+          <details class="menu">
+            <summary>More</summary>
+            <div class="menu-list">
+              <a href="/vms/{{ vm.name }}">View details</a>
+              {% if vm.live_ip %}<a href="#" data-copy="ssh {{ (vm.vm_user or settings.vm_user) }}@{{ vm.live_ip }}">Copy SSH command</a>{% endif %}
+              <hr>
+              <a href="/vms/{{ vm.name }}#destroy" class="danger">Destroy</a>
+            </div>
+          </details>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <h3>No virtual machines yet</h3>
+    <p>Create a VM from the latest template. It takes a couple of minutes.</p>
+    {% if vcenter_ready %}<a href="/vms/new" class="btn">Create VM</a>{% endif %}
+  </div>
+  {% endif %}
+</div>

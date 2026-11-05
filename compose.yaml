@@ -1,0 +1,20 @@
+services:
+  portal:
+    build: .
+    image: vm-portal:latest
+    # Host networking lets the IP scanner see the LAN's ARP table and lets
+    # Packer reach build VMs directly. The portal listens on $PORT (8080).
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - portal-data:/data
+    # Least privilege: no Linux capabilities except raw sockets for ping/fping
+    # (free-IP scanner). The app runs as uid 1000.
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    restart: unless-stopped
+
+volumes:
+  portal-data:

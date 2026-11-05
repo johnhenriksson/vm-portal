@@ -1,0 +1,18 @@
+.env
+.env.*
+!.env.example
+.git
+.github
+.claude
+data
+.venv
+**/__pycache__
+.pytest_cache
+tests
+screenshot*.png
+# Never bake local Packer variable files (credentials), logs or caches into the image
+**/*.pkrvars.hcl
+**/*.pkrvars.json
+**/packer.log
+**/crash.log
+**/packer_cache

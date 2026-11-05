@@ -1,0 +1,18 @@
+.env
+data/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.terraform/
+*.tfstate*
+
+# Packer: local variable files hold credentials; runtime artifacts
+*.pkrvars.hcl
+!*.pkrvars.hcl.example
+packer.log
+packer_cache/
+crash.log
+
+# Reference material that isn't ours to redistribute
+screenshot*.png

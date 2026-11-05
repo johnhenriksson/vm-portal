@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% from "_icons.html" import os_icon %}
+{% block title %}Create VM · VM Portal{% endblock %}
+
+{% macro slider(name, label, stops, current, fmt, unit_label) -%}
+{% set stops = (stops + [current | int]) | unique | sort %}
+<div class="slider-field" data-slider="{{ name }}" data-unit="{{ unit_label }}">
+  <div class="slider-head">
+    <span class="label">{{ label }}</span>
+    <span class="value"><strong data-value></strong></span>
+  </div>
+  <div class="steps">
+    <span class="fill"></span>
+    {% for s in stops %}
+    <label class="step"><input type="radio" name="_{{ name }}_step" value="{{ s }}" {% if s == current | int %}checked{% endif %}>
+      <span class="dot"></span><span>{{ fmt(s) }}</span></label>
+    {% endfor %}
+  </div>
+</div>
+{%- endmacro %}
+{% macro gb(mb) %}{{ (mb / 1024) | round(1) | replace(".0", "") }}GB{% endmacro %}
+{% macro vcpu(n) %}{{ n }} vCPU{% endmacro %}
+{% macro disk(n) %}{{ n }}GB{% endmacro %}
+
+{% block banner %}
+<div class="stepbar" id="stepbar">
+  <a class="s active" href="#sec-image"><span class="n">1</span>Image</a><span class="line"></span>
+  <a class="s" href="#sec-size"><span class="n">2</span>Size</a><span class="line"></span>
+  <a class="s" href="#sec-network"><span class="n">3</span>Network & access</a><span class="line"></span>
+  <a class="s" href="#sec-finalize"><span class="n">4</span>Finalize</a>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="page-head"><div><h1>Create virtual machine</h1></div></div>
+
+<form method="post" action="/vms" id="vm-form" class="create-layout">
+{{ csrf_field(request) }}
+<div>
+  <section class="create-section" id="sec-image">
+    <h2>Choose an image</h2>
+    <div class="choice-list">
+      {% for c in choices %}
+      {% set chosen = form.template in (c.templates | map(attribute="name") | list) %}
+      <label class="choice" data-image-choice data-login-user="{{ c.login_user }}"
+             data-docker="{{ 'yes' if c.docker else 'no' }}" data-console-password="{{ 'yes' if c.console_password else 'no' }}">
+        <input type="radio" name="template" value="{{ form.template if chosen else c.templates[0].name }}" required
+               {% if chosen or (loop.first and not form.template) %}checked{% endif %}>
+        {{ os_icon(c.distro) }}
+        <span><span class="choice-title">{{ c.name }}</span>
+          <span class="choice-meta" style="display:block">Login user <code>{{ c.login_user }}</code>
+            {%- if c.templates[0].age_days is not none %} · newest built {{ c.templates[0].age_days }} days ago{% endif %}</span></span>
+        <span class="push">
+          <select class="version-select" aria-label="Template version for {{ c.name }}" {% if c.templates | length == 1 %}disabled{% endif %}>
+            {% for t in c.templates %}
+            <option value="{{ t.name }}" {% if t.name == form.template %}selected{% endif %}>{{ t.name }}{% if loop.first %} (newest){% endif %}</option>
+            {% endfor %}
+          </select>
+        </span>
+      </label>
+      {% else %}
+      <div class="alert warn">No templates found.{% if current_user.role == "admin" %} <a href="/images?tab=definitions">Build one</a> first.{% else %} Ask an admin to build one.{% endif %}</div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="create-section" id="sec-size">
+    <h2>Choose size</h2>
+    <p class="desc">Pick a size, or set exact values below.</p>
+    {{ slider("cpus", "vCPUs", [1, 2, 4, 8, 16], form.cpus, vcpu, "vCPUs") }}
+    {{ slider("memory_mb", "Memory", [1024, 2048, 4096, 8192, 16384, 32768], form.memory_mb, gb, "GB RAM") }}
+    {{ slider("disk_gb", "Disk", [20, 40, 80, 160, 320], form.disk_gb, disk, "GB disk") }}
+    <details class="custom-size">
+      <summary>Custom values</summary>
+      <div class="grid-3">
+        <label class="field"><span class="label">vCPUs</span>
+          <input type="number" name="cpus" id="cpus" min="1" max="32" value="{{ form.cpus }}" required></label>
+        <label class="field"><span class="label">Memory (MB)</span>
+          <input type="number" name="memory_mb" id="memory_mb" min="512" step="512" value="{{ form.memory_mb }}" required></label>
+        <label class="field"><span class="label">Disk (GB)</span>
+          <input type="number" name="disk_gb" id="disk_gb" min="10" value="{{ form.disk_gb }}" required></label>
+      </div>
+    </details>
+  </section>
+
+  <section class="create-section" id="sec-network">
+    <h2>Network</h2>
+    <div class="box-tabs">
+      <label><input type="radio" name="ip_mode" value="dhcp" {% if form.ip_mode != 'static' %}checked{% endif %}>DHCP<small>Address from the router</small></label>
+      <label><input type="radio" name="ip_mode" value="static" {% if form.ip_mode == 'static' %}checked{% endif %}>Static IP<small>Pick from the pool</small></label>
+    </div>
+    <div id="dhcp-pane" {% if form.ip_mode == 'static' %}hidden{% endif %}>
+      <p class="muted">The VM gets its address over DHCP. It shows up on the VM page once VMware Tools reports it.</p>
+    </div>
+    <div id="static-pane" {% if form.ip_mode != 'static' %}hidden{% endif %}>
+      <span class="label">IP address</span>
+      <div class="row">
+        <input id="ip" name="ip" value="{{ form.ip or '' }}" placeholder="{{ settings.ip_pool_start or '192.0.2.10' }}" class="mono">
+        <button type="button" class="btn-outline" hx-get="/ip/suggest?fresh=true" hx-target="#ip-suggestions"
+                hx-indicator="#scan-spinner">Find free IPs</button>
+        <span id="scan-spinner" class="htmx-indicator" aria-busy="true">Scanning…</span>
+      </div>
+      <span class="hint">/{{ settings.ip_prefix }} · gateway {{ settings.ip_gateway or "not set" }} ·
+             DNS {{ (settings.ip_dns or [settings.ip_gateway]) | join(", ") }}</span>
+      <div id="ip-suggestions"></div>
+    </div>
+
+    <h2 style="margin-top:2rem">Authentication</h2>
+    <p class="desc">SSH keys for user <code data-show-login-user>{{ choices[0].login_user if choices else settings.vm_user }}</code>.</p>
+    {% if settings.default_ssh_keys %}
+    <div class="checklist" style="margin-bottom:1.25rem">
+      <div class="head"><input type="checkbox" checked disabled> Default keys <span class="count">{{ settings.default_ssh_keys | length }} / {{ settings.default_ssh_keys | length }}</span></div>
+      {% for k in settings.default_ssh_keys %}
+      {% set parts = k.split() %}
+      <div><input type="checkbox" checked disabled>
+        <strong>{{ parts[2:] | join(" ") or "unnamed key" }}</strong>
+        <span class="key">{{ parts[0] }} {{ (parts[1] or "")[:24] }}…</span></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <label class="field"><span class="label">Add SSH keys</span>
+      <textarea name="ssh_keys" rows="3" class="mono" placeholder="ssh-ed25519 AAAA… you@laptop">{{ form.ssh_keys or '' }}</textarea>
+      <span class="hint">One public key per line.{% if settings.default_ssh_keys %} The default keys above are always added.{% endif %}</span>
+    </label>
+    <div data-needs="console-password">
+    <span class="label">Console password <span class="muted" style="font-weight:400">(optional)</span></span>
+    <div class="grid-2">
+      <label class="field"><input type="password" name="console_password" id="console_password" minlength="12" maxlength="72"
+             autocomplete="new-password" placeholder="Password" aria-label="Console password"></label>
+      <label class="field"><input type="password" name="console_password_confirm" minlength="12" maxlength="72"
+             autocomplete="new-password" placeholder="Confirm password" aria-label="Confirm console password"></label>
+    </div>
+    <span class="hint" style="margin-top:-.75rem;margin-bottom:1.25rem">Lets <code data-show-login-user>{{ choices[0].login_user if choices else settings.vm_user }}</code> log in on the browser console,
+      e.g. when the network or SSH is broken. SSH stays key-only. At least 12 characters; the portal never stores it.</span>
+    </div>
+  </section>
+
+  <section class="create-section" id="sec-finalize">
+    <h2>Finalize details</h2>
+    <label class="field"><span class="label">Hostname</span>
+      <input name="name" id="name" value="{{ form.name or '' }}" required pattern="[a-z][a-z0-9\-]{1,30}[a-z0-9]"
+             placeholder="app01" autocomplete="off">
+      <span class="hint">Lowercase letters, digits and '-'. Also the VM name in vCenter.</span>
+    </label>
+    <div data-needs="docker">
+    <label class="field"><span class="label">compose.yaml <span class="muted" style="font-weight:400">(optional)</span></span>
+      <textarea name="compose_yaml" rows="8" class="mono" placeholder="services:&#10;  web:&#10;    image: nginx&#10;    ports: [&quot;80:80&quot;]">{{ form.compose_yaml or '' }}</textarea>
+      <span class="hint">Saved to <code>/opt/app/compose.yaml</code> and started on first boot.</span>
+    </label>
+    </div>
+  </section>
+</div>
+
+<aside class="summary card">
+  <div class="card-head">Summary</div>
+  <div class="card-body">
+    <div class="line"><span>Hostname</span><span data-sum="name">–</span></div>
+    <div class="line"><span>Image</span><span data-sum="template">–</span></div>
+    <div class="line"><span>Size</span><span data-sum="size">–</span></div>
+    <div class="line"><span>Network</span><span data-sum="net">–</span></div>
+    <div class="line"><span>Console login</span><span data-sum="console">–</span></div>
+    <div class="total"><button type="submit" class="btn-block">Create VM</button></div>
+  </div>
+</aside>
+</form>
+
+{% endblock %}

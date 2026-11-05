@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} · VM Portal{% endblock %}
+{% block content %}
+<div class="empty-state">
+  <h2>{{ {403: "Not allowed", 404: "Not found", 409: "Busy", 429: "Slow down"}.get(status, "Something went wrong") }}</h2>
+  <p>{{ detail }}</p>
+  <a href="/" class="btn btn-outline">Back to virtual machines</a>
+</div>
+{% endblock %}
+{% block public_content %}
+  <h1 style="font-size:1.5rem">{{ status }}</h1>
+  <p>{{ detail }}</p>
+  <a href="/login" class="btn btn-block">Log in</a>
+{% endblock %}

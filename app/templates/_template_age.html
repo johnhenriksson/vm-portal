@@ -1,0 +1,5 @@
+{% macro age(t, max_days) -%}
+{% if t.age_days is none %}<span class="muted">unknown age</span>
+{% elif t.age_days > max_days %}<span class="badge stale">{{ t.age_days }} days old</span>
+{% else %}<span class="muted">{{ t.age_days }} days old</span>{% endif %}
+{%- endmacro %}

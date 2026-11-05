@@ -1,0 +1,49 @@
+{% macro field(f) -%}
+{% if f.type == "bool" %}
+  <label class="check-field">
+    <input type="checkbox" name="{{ f.key }}" {% if f.value %}checked{% endif %} {% if f.locked %}disabled{% endif %}>
+    <span><span class="label">{{ f.label }}</span>
+      {% if f.hint %}<span class="hint">{{ f.hint }}</span>{% endif %}
+      {% if f.locked %}<span class="hint lock">Set by the environment</span>{% endif %}</span>
+  </label>
+{% else %}
+  <label class="field"><span class="label">{{ f.label }}</span>
+  {% if f.type == "password" %}
+    <input type="password" name="{{ f.key }}" autocomplete="new-password" maxlength="1024"
+           placeholder="{{ '•••••••• saved; leave empty to keep' if f.is_set else '' }}" {% if f.locked %}disabled{% endif %}>
+  {% else %}
+    <input {% if f.type == "number" %}type="number"{% else %}type="text"{% endif %} name="{{ f.key }}" value="{{ f.value }}"
+           {% if f.mono %}class="mono"{% endif %} autocomplete="off" spellcheck="false" {% if f.locked %}disabled{% endif %}>
+  {% endif %}
+  {% if f.locked %}<span class="hint lock">Set by the environment ({{ f.key | upper }})</span>
+  {% elif f.hint %}<span class="hint">{{ f.hint }}</span>{% endif %}
+  </label>
+{% endif %}
+{%- endmacro %}
+
+{% macro select(f) -%}
+<label class="field"><span class="label">{{ f.label }}</span>
+  {% if f.locked %}
+    <input type="text" value="{{ f.value }}" disabled>
+    <span class="hint lock">Set by the environment ({{ f.key | upper }})</span>
+  {% else %}
+    <select name="{{ f.key }}" {% if not f.options and not f.optional %}disabled{% endif %}
+      {% if f.cascade %}hx-post="/settings/vcenter/placement" hx-trigger="change" hx-target="#placement"{% endif %}>
+      <option value="" {% if not f.value %}selected{% endif %} {% if not f.optional %}disabled{% endif %}>{{ f.empty }}</option>
+      {% for value, label in f.options %}
+      <option value="{{ value }}" {% if value == f.value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    {% if f.missing %}<span class="hint lock">The saved value wasn't found in vCenter. Choose another.</span>{% endif %}
+  {% endif %}
+</label>
+{%- endmacro %}
+
+{% macro stepbar(steps, active) -%}
+<div class="stepbar">
+  {% for label in steps %}
+  {% if not loop.first %}<span class="line"></span>{% endif %}
+  <span class="s {{ 'active' if loop.index == active }} {{ 'done' if loop.index < active }}"><span class="n">{{ "✓" if loop.index < active else loop.index }}</span>{{ label }}</span>
+  {% endfor %}
+</div>
+{%- endmacro %}

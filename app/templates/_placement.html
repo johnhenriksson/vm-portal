@@ -1,0 +1,10 @@
+{% from "_fields.html" import field, select %}
+{% if error_text %}
+  <div class="alert">Couldn't load resources from vCenter: {{ error_text }}</div>
+  <p class="muted">You can still type the names yourself.</p>
+  <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
+{% else %}
+  <div class="alert ok">Connected to {{ about }}</div>
+  {% if not selects[0].options %}<div class="alert warn">vCenter has no datacenters, or this user can't see them.</div>{% endif %}
+  <div class="grid-2">{% for f in selects %}{{ select(f) }}{% endfor %}</div>
+{% endif %}

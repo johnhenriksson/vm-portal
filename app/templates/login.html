@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Log in · VM Portal{% endblock %}
+{% block public %}
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="brand"><span class="brand-mark">{{ icon("server") }}</span> VM Portal</div>
+    <h1 style="font-size:1.5rem">Log in</h1>
+    {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      {{ csrf_field(request) }}
+      <label class="field"><span class="label">Username</span>
+        <input name="username" value="{{ username or '' }}" autofocus required autocomplete="username"
+               autocapitalize="none" spellcheck="false" maxlength="64">
+      </label>
+      <label class="field"><span class="label">Password</span>
+        <input type="password" name="password" required autocomplete="current-password" maxlength="256">
+      </label>
+      <button type="submit" class="btn-block">Log in</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

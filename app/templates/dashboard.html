@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "_template_age.html" import age %}
+{% from "_icons.html" import os_icon %}
+{% block title %}Virtual machines · VM Portal{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Virtual machines</h1>
+    <p class="sub">Ubuntu VMs provisioned from the Packer template.</p>
+  </div>
+  <div class="actions">{% if vcenter_ready %}<a href="/vms/new" class="btn">Create VM</a>{% endif %}</div>
+</div>
+
+{% if not vcenter_ready %}
+<div class="alert warn">vCenter isn't configured yet.
+  {% if current_user.role == "admin" %}<a href="/setup/vcenter">Run the setup wizard</a>.{% else %}Ask an admin to configure it.{% endif %}</div>
+{% endif %}
+
+{% with error=None %}{% include "_vm_table.html" %}{% endwith %}
+
+<div class="section">
+  <div class="section-head"><h2>Images</h2>{% if current_user.role == "admin" %}<a href="/images">Manage images</a>{% endif %}</div>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+      {% for g in groups %}
+        {% set t = g.templates[0] %}
+        <tr>
+          <td {% if loop.first %}style="border-top:0"{% endif %}>
+            <div class="name-cell">{{ os_icon(g.image.manifest.os.distro if g.image else "") }}
+              <div><span class="title plain">{{ g.image.manifest.name if g.image else "Other templates" }}</span>
+                   <span class="meta">{{ t.name }}{% if g.templates | length > 1 %} · {{ g.templates | length }} versions{% endif %}</span></div></div>
+          </td>
+          <td {% if loop.first %}style="border-top:0"{% endif %}>{{ age(t, settings.template_max_age_days) }}</td>
+          <td class="right" {% if loop.first %}style="border-top:0"{% endif %}>
+            {% if current_user.role == "admin" and g.image and t.age_days is not none and t.age_days > settings.template_max_age_days %}
+              <a href="/images/defs/{{ g.image.id }}" class="btn btn-outline btn-sm">Rebuild</a>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td class="empty" style="border-top:0">No templates yet.{% if current_user.role == "admin" %} <a href="/images?tab=definitions">Build one</a>.{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-head"><h2>Recent jobs</h2><a href="/jobs">View all</a></div>
+  {% include "_jobs_table.html" %}
+</div>
+{% endblock %}

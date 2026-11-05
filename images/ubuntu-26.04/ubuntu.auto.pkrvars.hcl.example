@@ -1,0 +1,23 @@
+# For building this image with plain Packer (the portal passes all of this itself).
+# Copy to ubuntu.auto.pkrvars.hcl (gitignored) and fill in. Pass the password via
+# the environment instead of this file:  export PKR_VAR_vsphere_password='...'
+vsphere_server     = "vcenter.example.com"
+vsphere_user       = "svc-vmportal@vsphere.local"
+vsphere_insecure   = false
+vsphere_datacenter = "Datacenter"
+vsphere_cluster    = "Cluster"
+vsphere_network    = "VM Network"
+vsphere_datastore  = "datastore1"
+
+vm_cpu_num   = 2
+vm_mem_size  = 2048
+vm_disk_size = 25600
+
+iso_url = "[datastore1] ISO/ubuntu-26.04-live-server-amd64.iso"
+
+ssh_username         = "ubuntu"
+ssh_private_key_file = "~/.ssh/id_ed25519"
+# Public key(s) for the build; must match ssh_private_key_file. Removed at the end.
+ssh_authorized_keys = ["ssh-ed25519 AAAA... you@host"]
+
+keyboard_layout = "us"

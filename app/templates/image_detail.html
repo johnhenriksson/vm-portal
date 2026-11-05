@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% from "_icons.html" import os_icon %}
+{% from "_fields.html" import field %}
+{% block title %}{{ img.manifest.name if img.manifest else img.id }} · Images{% endblock %}
+{% block content %}
+{% set m = img.manifest %}
+<div class="crumbs"><a href="/images?tab=definitions">Image definitions</a> / {{ img.id }}</div>
+<div class="page-head">
+  <div class="name-cell">{{ os_icon(m.os.distro if m else "") }}
+    <div><h1 style="margin:0">{{ m.name if m else img.id }}</h1>
+      <p class="sub" style="margin:0">{{ img.id }} · {{ "built-in" if img.builtin else "custom" }}{% if m %} · templates <code>{{ m.template_prefix }}-*</code> · guest {{ m.guest }}{% endif %}</p></div>
+  </div>
+  <div class="actions">
+    <a href="/images/defs/{{ img.id }}/files" class="btn btn-outline">{{ "Edit files" if (not img.builtin and editing_enabled) else "View files" }}</a>
+    {% if m and not problems and not building %}
+    <form method="post" action="/images/defs/{{ img.id }}/build" data-confirm="Build a new {{ m.name }} template? It takes a while.">
+      {{ csrf_field(request) }}<button>Build template</button></form>
+    {% elif building %}<span class="badge running">Building</span>{% endif %}
+  </div>
+</div>
+
+{% if problems %}<div class="alert warn"><strong>Can't build yet:</strong>
+  <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul></div>{% endif %}
+
+{% if m %}
+<p class="muted" style="max-width:52rem">{{ m.description }}</p>
+<form method="post" action="/images/defs/{{ img.id }}/settings" class="settings-form">
+  {{ csrf_field(request) }}
+  <label class="check-field"><input type="checkbox" name="enabled" {% if cfg.enabled %}checked{% endif %}>
+    <span><span class="label">Enabled</span><span class="hint">Disabled images can't be built and aren't offered when creating VMs.</span></span></label>
+
+  <h2 class="sub-head">Installer</h2>
+  <div id="iso-picker" hx-get="/images/defs/{{ img.id }}/isos" hx-trigger="load">
+    <label class="field"><span class="label">Installer ISO</span>
+      <input type="text" name="iso_url" value="{{ cfg.iso_url }}" class="mono" autocomplete="off">
+      <span class="hint" aria-busy="true">Looking for ISO files on the datastores…</span></label>
+  </div>
+
+  <h2 class="sub-head">Build</h2>
+  <div class="grid-2">
+    <label class="field"><span class="label">Build VM vCPUs</span><input type="number" name="cpus" min="1" max="32" value="{{ cfg.cpus }}"></label>
+    <label class="field"><span class="label">Build VM memory (MB)</span><input type="number" name="memory_mb" min="1024" step="512" value="{{ cfg.memory_mb }}"></label>
+    <label class="field"><span class="label">Template disk (MB)</span><input type="number" name="disk_mb" min="10240" value="{{ cfg.disk_mb }}">
+      <span class="hint">VMs can get bigger disks than the template.</span></label>
+    <label class="field"><span class="label">Templates to keep</span><input type="number" name="keep" min="1" max="20" value="{{ cfg.keep }}">
+      <span class="hint">Older templates of this image are deleted after a successful build.</span></label>
+  </div>
+
+  {% if m.parameters %}
+  <h2 class="sub-head">Parameters</h2>
+  <div class="grid-2">
+    {% for p in m.parameters %}
+    <label class="field"><span class="label">{{ p.label }}</span>
+      <input type="text" name="param_{{ p.name }}" value="{{ cfg.params.get(p.name, '') }}" class="mono" autocomplete="off" spellcheck="false">
+      <span class="hint">{{ p.help }}{% if p.default %} Default: <code>{{ p.default }}</code>.{% endif %}</span></label>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="row form-actions"><button type="submit">Save</button></div>
+</form>
+
+<div class="section">
+  <div class="section-head"><h2>Builds</h2></div>
+  {% with jobs=builds %}{% include "_jobs_table.html" %}{% endwith %}
+</div>
+{% endif %}
+
+{% if editing_enabled %}
+<div class="section card" style="max-width:52rem">
+  <div class="card-head">Duplicate</div>
+  <div class="card-body">
+    <p class="muted">Copy this definition to a custom one you can edit, e.g. to make a variant or start a new OS.</p>
+    <form method="post" action="/images/defs/{{ img.id }}/duplicate">
+      {{ csrf_field(request) }}
+      <div class="grid-3">
+        <label class="field"><span class="label">New id</span><input name="new_id" required pattern="[a-z0-9][a-z0-9.\-]{1,47}" placeholder="debian-13" class="mono"></label>
+        <label class="field"><span class="label">Name</span><input name="name" required maxlength="80" placeholder="Debian 13"></label>
+        <label class="field"><span class="label">Template prefix</span><input name="template_prefix" required placeholder="debian-13" class="mono"></label>
+      </div>
+      <button class="btn-outline">Duplicate</button>
+    </form>
+  </div>
+</div>
+{% if not img.builtin %}
+<div class="section card danger-zone" style="max-width:52rem">
+  <div class="card-head">Delete definition</div>
+  <div class="card-body">
+    <p>Moves the definition to the data volume's <code>images/.deleted</code> folder. Templates already built stay in vCenter.</p>
+    <form method="post" action="/images/defs/{{ img.id }}/delete" class="row" style="align-items:flex-end">
+      {{ csrf_field(request) }}
+      <label class="field" style="margin:0;flex:1;max-width:22rem"><span class="label">Type <code>{{ img.id }}</code> to confirm</span>
+        <input name="confirm" required autocomplete="off"></label>
+      <button class="btn-danger">Delete</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

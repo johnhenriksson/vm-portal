@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}{{ path }} · {{ img.id }}{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="/images?tab=definitions">Image definitions</a> / <a href="/images/defs/{{ img.id }}">{{ img.id }}</a> / files</div>
+<div class="page-head">
+  <div><h1>{{ img.manifest.name if img.manifest else img.id }}</h1>
+    <p class="sub">{{ "Built-in definition (read-only)" if img.builtin else "Custom definition" }}</p></div>
+</div>
+
+{% if not editable %}
+<div class="alert warn">
+  {% if img.builtin %}Built-in definitions are read-only.{% if editing_enabled %} Use <a href="/images/defs/{{ img.id }}">Duplicate</a> to make an editable copy.{% endif %}
+  {% else %}Editing is disabled. The operator can allow it with <code>ALLOW_IMAGE_EDITING=true</code>.{% endif %}
+</div>
+{% else %}
+<div class="alert warn">Image definitions are code: Packer runs them inside the portal with access to vCenter.
+  Only make changes you understand; every change is audited and can be restored below.</div>
+{% endif %}
+{% if img.error %}<div class="alert">{{ img.error }}</div>{% endif %}
+
+<div class="editor-layout">
+  <aside>
+    <nav class="file-list">
+      {% for f in files %}<a href="?path={{ f | urlencode }}" class="{{ 'active' if f == path }}">{{ f }}</a>{% endfor %}
+    </nav>
+    {% if editable %}
+    <form method="post" action="/images/defs/{{ img.id }}/files/new" style="margin-top:1rem">
+      {{ csrf_field(request) }}
+      <label class="field"><span class="label">New file</span>
+        <input name="path" required class="mono" placeholder="scripts/setup.sh" autocomplete="off" spellcheck="false"></label>
+      <button class="btn-outline btn-sm">Create</button>
+    </form>
+    {% if snapshots %}
+    <details class="plain" style="margin-top:1.5rem"><summary>History ({{ snapshots | length }})</summary>
+      <ul style="list-style:none;padding:0">
+      {% for snap in snapshots %}
+        <li style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin:.35rem 0">
+          <span class="mono small">{{ snap[:4] }}-{{ snap[4:6] }}-{{ snap[6:8] }} {{ snap[9:11] }}:{{ snap[11:13] }}:{{ snap[13:15] }}</span>
+          <form method="post" action="/images/defs/{{ img.id }}/history/{{ snap }}/restore" data-confirm="Restore this snapshot? The current state is saved first.">
+            {{ csrf_field(request) }}<button class="link-btn small">Restore</button></form>
+        </li>
+      {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% endif %}
+  </aside>
+
+  <section>
+    <form method="post" action="/images/defs/{{ img.id }}/files/save">
+      {{ csrf_field(request) }}
+      <input type="hidden" name="path" value="{{ path }}">
+      <div class="row" style="justify-content:space-between;margin-bottom:.5rem">
+        <strong class="mono">{{ path }}</strong>
+        <span class="row">
+          <button formaction="/images/defs/{{ img.id }}/validate" class="btn-secondary btn-sm">Check syntax</button>
+          {% if editable %}<button class="btn-sm">Save</button>{% endif %}
+        </span>
+      </div>
+      <textarea name="content" class="code" spellcheck="false" autocapitalize="off" {% if not editable %}readonly{% endif %}>{{ content }}</textarea>
+    </form>
+    {% if check_output %}
+      <div class="alert {{ 'ok' if check_ok else '' }}" style="margin-top:1rem;margin-bottom:.5rem">packer validate -syntax-only: {{ "passed" if check_ok else "failed" }}</div>
+      <pre class="check">{{ check_output }}</pre>
+    {% endif %}
+    {% if editable and path != "image.yaml" %}
+    <form method="post" action="/images/defs/{{ img.id }}/files/delete" data-confirm="Delete {{ path }}?" style="margin-top:1rem">
+      {{ csrf_field(request) }}<input type="hidden" name="path" value="{{ path }}">
+      <button class="link-btn danger">Delete this file</button></form>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

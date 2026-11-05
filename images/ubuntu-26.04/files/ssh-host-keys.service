@@ -1,0 +1,17 @@
+[Unit]
+Description=Generate SSH host keys if missing (safety net for cloned VMs)
+ConditionPathExistsGlob=!/etc/ssh/ssh_host_*_key
+# No default dependencies: those would order this after basic.target, which
+# comes after ssh.socket, and "Before=ssh.socket" would then form an ordering
+# cycle that systemd breaks by not starting sockets.target (= no sshd).
+DefaultDependencies=no
+After=local-fs.target cloud-init.service
+Before=ssh.socket ssh.service sockets.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=sockets.target

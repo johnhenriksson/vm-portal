@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% from "_status.html" import badge, power %}
+{% from "_icons.html" import ubuntu %}
+{% block title %}{{ vm.name }} · VM Portal{% endblock %}
+{% block content %}
+{% set ip = (info.ip if info else None) or vm.ip %}
+<div class="crumbs"><a href="/">Virtual machines</a> / {{ vm.name }}</div>
+<div class="page-head">
+  <div class="name-cell">{{ ubuntu("os-icon") }}
+    <div><h1 style="margin:0">{{ vm.name }}</h1>
+      <p class="sub" style="margin:0">{{ vm.cpus }} vCPU / {{ (vm.memory_mb / 1024) | round(1) | replace(".0", "") }} GB / {{ vm.disk_gb }} GB disk · {{ vm.template }}</p></div>
+  </div>
+  <div class="actions">
+    {{ badge(vm.status) }}
+    {% if info and vm.status == "ready" and info.power_state == "poweredOn" %}
+      <a href="/vms/{{ vm.name }}/console" target="_blank" rel="noopener" class="btn btn-outline">Console</a>
+    {% endif %}
+    {% if info and vm.status == "ready" and not busy %}
+      {% if info.power_state != "poweredOn" %}
+        <form method="post" action="/vms/{{ vm.name }}/power/on">{{ csrf_field(request) }}<button>Power on</button></form>
+      {% else %}
+        <details class="menu">
+          <summary class="btn btn-outline">Power</summary>
+          <div class="menu-list">
+            <form method="post" action="/vms/{{ vm.name }}/power/reboot">{{ csrf_field(request) }}<button>Reboot</button></form>
+            <form method="post" action="/vms/{{ vm.name }}/power/shutdown">{{ csrf_field(request) }}<button>Shut down</button></form>
+            <hr>
+            <form method="post" action="/vms/{{ vm.name }}/power/off" data-confirm="Hard power off {{ vm.name }}?">{{ csrf_field(request) }}
+              <button class="danger">Power off (hard)</button></form>
+          </div>
+        </details>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+
+{% if busy %}<div class="alert warn"><span aria-busy="true"></span>A job is running for this VM.</div>{% endif %}
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-head">Overview</div>
+    <div class="card-body">
+      <dl class="props">
+        <dt>Power</dt><dd>{% if info %}{{ power(info.power_state) }}{% else %}<span class="error">Not found in vCenter</span>{% endif %}</dd>
+        <dt>IP address</dt><dd>{% if ip %}<span class="mono">{{ ip }}</span> <span class="muted">({{ "static" if vm.ip_mode == "static" else "DHCP" }})</span>{% else %}–{% endif %}</dd>
+        <dt>Created</dt><dd>{{ vm.created_at[:16] | replace("T", " ") }}</dd>
+        <dt>Template</dt><dd>{{ vm.template }}</dd>
+        {% if current_user.role == "admin" %}<dt>Owner</dt><dd>{{ owner or "–" }}</dd>{% endif %}
+        <dt>Compose app</dt><dd>{{ "Yes, /opt/app/compose.yaml" if vm.has_compose else "No" }}</dd>
+      </dl>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head">Access</div>
+    <div class="card-body">
+      {% if ip %}
+        <span class="label">SSH</span>
+        <div class="row">
+          <input id="ssh-cmd" class="mono" readonly value="ssh {{ (vm.vm_user or settings.vm_user) }}@{{ ip }}">
+          <button type="button" class="btn-secondary" data-copy="ssh {{ (vm.vm_user or settings.vm_user) }}@{{ ip }}">Copy</button>
+        </div>
+        <span class="hint">Logs in as <code>{{ (vm.vm_user or settings.vm_user) }}</code> with the default or added SSH keys.</span>
+      {% else %}
+        <p class="muted">No IP address yet. It shows up once VMware Tools reports one.</p>
+      {% endif %}
+      <span class="label" style="margin-top:1.25rem">Console</span>
+      {% if vm.console_login %}
+        <p class="muted" style="margin:0">Log in as <code>{{ (vm.vm_user or settings.vm_user) }}</code> with the console password set when the VM was created.</p>
+      {% else %}
+        <p class="muted" style="margin:0">View only: this VM has no console password, so you can watch it boot but not log in.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-head"><h2>Jobs</h2></div>
+  {% include "_jobs_table.html" %}
+</div>
+
+{% if not busy %}
+<div class="section card danger-zone" id="destroy">
+  <div class="card-head">Destroy</div>
+  <div class="card-body">
+    <p>Destroying <strong>{{ vm.name }}</strong> deletes the VM and its disk from vCenter. This can't be undone.</p>
+    <form method="post" action="/vms/{{ vm.name }}/destroy" class="row" style="align-items:flex-end">
+      {{ csrf_field(request) }}
+      <label class="field" style="margin:0;flex:1;max-width:22rem"><span class="label">Type <code>{{ vm.name }}</code> to confirm</span>
+        <input name="confirm" required pattern="{{ vm.name }}" autocomplete="off"></label>
+      <button class="btn-danger">Destroy VM</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

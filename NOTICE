@@ -1,0 +1,8 @@
+vm-portal
+Copyright 2026 John Henriksson
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles third-party software under its own licenses, including
+noVNC (MPL-2.0), pako (MIT) and htmx (0BSD). The container image also includes
+OpenTofu (MPL-2.0) and Packer (BUSL-1.1). See THIRD_PARTY_NOTICES.md.

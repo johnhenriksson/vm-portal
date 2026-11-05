@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% from "_status.html" import badge %}
+{% set kind_labels = {"vm-create": "Create VM", "vm-destroy": "Destroy VM", "packer-build": "Template build"} %}
+{% block title %}Job #{{ job.id }} · VM Portal{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="/jobs">Jobs</a> / #{{ job.id }}</div>
+<div class="page-head">
+  <div>
+    <h1>{{ kind_labels.get(job.kind, job.kind) }}: {{ job.target }}</h1>
+    <p class="sub">Job #{{ job.id }} · started {{ (job.started_at or job.created_at)[:16] | replace("T", " ") }}</p>
+  </div>
+  <div class="actions">
+    <span id="job-status">{{ badge(job.status) }}</span>
+    {% if job.kind.startswith("vm-") and job.kind != "vm-destroy" %}<a href="/vms/{{ job.target }}" class="btn btn-outline">Go to VM</a>{% endif %}
+  </div>
+</div>
+<div class="log-head"><span>Output</span><label class="row" style="gap:.4rem"><input type="checkbox" id="follow" checked> Follow</label></div>
+<pre id="log" class="log" data-stream="/jobs/{{ job.id }}/stream"></pre>
+{% endblock %}

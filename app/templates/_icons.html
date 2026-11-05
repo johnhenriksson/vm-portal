@@ -1,0 +1,40 @@
+{% macro icon(name) -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if name == "server" -%}
+<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01M11 7.5h6M11 16.5h6"/>
+{%- elif name == "plus" -%}
+<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>
+{%- elif name == "image" -%}
+<path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"/>
+{%- elif name == "jobs" -%}
+<path d="M9 6h11M9 12h11M9 18h11"/><path d="m4 6 1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/>
+{%- elif name == "settings" -%}
+<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>
+{%- elif name == "user" -%}
+<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>
+{%- elif name == "logout" -%}
+<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H4"/>
+{%- endif -%}
+</svg>
+{%- endmacro %}
+
+{% macro ubuntu(cls="os-icon") -%}
+<svg class="{{ cls }}" viewBox="0 0 32 32" aria-hidden="true">
+  <circle cx="16" cy="16" r="9.5" fill="none" stroke="currentColor" stroke-width="3"/>
+  <circle cx="5.5" cy="16" r="3.4" fill="currentColor" stroke="#fff" stroke-width="2.5"/>
+  <circle cx="21.3" cy="6.9" r="3.4" fill="currentColor" stroke="#fff" stroke-width="2.5"/>
+  <circle cx="21.3" cy="25.1" r="3.4" fill="currentColor" stroke="#fff" stroke-width="2.5"/>
+</svg>
+{%- endmacro %}
+
+{% macro os_icon(distro, cls="os-icon") -%}
+{% if distro == "ubuntu" %}{{ ubuntu(cls) }}
+{% else %}
+{% set colors = {"debian": "#a80030", "rocky": "#10b981", "rhel": "#ee0000", "almalinux": "#0f4266",
+                 "fedora": "#51a2da", "windows": "#0078d4", "centos": "#932279"} %}
+<svg class="{{ cls }}" viewBox="0 0 32 32" aria-hidden="true" style="color:{{ colors.get(distro, '#5b6987') }}">
+  <circle cx="16" cy="16" r="14" fill="currentColor"/>
+  <text x="16" y="21" text-anchor="middle" font-size="14" font-weight="700" fill="#fff" font-family="sans-serif">{{ (distro or "?")[:1] | upper }}</text>
+</svg>
+{% endif %}
+{%- endmacro %}
