@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 from datetime import datetime
 from pathlib import Path
 
@@ -68,6 +69,26 @@ def regenerate_key() -> None:
     ensure_key()
 
 
+def http_ip() -> str:
+    """Address build VMs reach the portal at, for Packer's HTTP server.
+
+    Packer would otherwise guess, and with host networking it can pick a Docker
+    bridge. The source address of the route to vCenter is a far better guess; the
+    setting overrides it. No packets are sent: connecting a UDP socket only picks a route.
+    """
+    s = get_settings()
+    if s.packer_http_ip:
+        return s.packer_http_ip
+    host = s.vsphere_server.rsplit(":", 1)[0] if s.vsphere_server.count(":") == 1 else s.vsphere_server
+    try:
+        addr = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(addr)
+            return sock.getsockname()[0]
+    except OSError:
+        return ""  # let Packer choose
+
+
 def packer_env(img: images.ImageDef, cfg: images.ImageConfig, template_name: str) -> dict[str, str]:
     """PKR_VAR_* for a build: the portal's standard variables plus the image's parameters.
 
@@ -94,6 +115,7 @@ def packer_env(img: images.ImageDef, cfg: images.ImageConfig, template_name: str
         "PKR_VAR_ssh_private_key_file": str(ensure_key()),
         # Packer parses complex PKR_VAR_* values as HCL; a JSON list is valid HCL.
         "PKR_VAR_ssh_authorized_keys": json.dumps([public_key()]),
+        "PKR_VAR_http_ip": http_ip(),
     }
     for name, value in cfg.params.items():  # validated against the manifest's patterns
         env[f"PKR_VAR_{name}"] = value
@@ -153,8 +175,12 @@ def _build_slots() -> asyncio.Semaphore:
 
 
 # Files never copied into a build: local credentials, logs, caches, editor history.
-COPY_IGNORE = shutil.ignore_patterns("*.pkrvars.hcl", "packer.log", "crash.log", "packer_cache", ".git",
-                                     ".history")
+_IGNORE = shutil.ignore_patterns("*.pkrvars.hcl", "packer.log", "crash.log", "packer_cache", ".git", ".history")
+
+
+def COPY_IGNORE(directory: str, names: list[str]) -> set[str]:
+    """Also skip symlinks: a build only gets the definition's own files."""
+    return set(_IGNORE(directory, names)) | {n for n in names if os.path.islink(os.path.join(directory, n))}
 
 
 def start_build(img: images.ImageDef, user_id: int | None = None) -> int:
@@ -169,7 +195,7 @@ def start_build(img: images.ImageDef, user_id: int | None = None) -> int:
             log.step(f"Copying image definition {img.id} -> {work}")
             shutil.copytree(img.path, work, ignore=COPY_IGNORE)
             try:
-                env = packer_env(img, cfg, name)
+                env = await asyncio.to_thread(packer_env, img, cfg, name)  # resolves vCenter
                 log.step(f"Building template {name}")
                 await log.run(["packer", "init", "."], cwd=work, env=env)
                 await log.run(["packer", "build", "-color=false", "-on-error=cleanup", "."], cwd=work, env=env)

@@ -499,3 +499,40 @@ textarea.code { font-family: var(--mono); font-size: 13px; line-height: 1.5; min
 pre.check { background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius); padding: .75rem 1rem;
   font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; max-height: 16rem; overflow: auto; }
 @media (max-width: 960px) { .editor-layout { grid-template-columns: 1fr; } }
+.confirm-field { max-width: 24rem; margin-top: 1rem; }
+
+/* Code editor (editor.js): textarea over a highlighted copy, with a line-number gutter */
+.code-editor { border: 1px solid var(--border-strong); border-radius: var(--radius); background: #fbfcfd; }
+.code-editor.enhanced { display: grid; grid-template-columns: auto minmax(0, 1fr); height: 65vh; min-height: 22rem;
+  overflow: hidden; resize: vertical; }
+.code-editor:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
+.code-editor .gutter { overflow: hidden; background: var(--bg-subtle); border-right: 1px solid var(--border);
+  color: var(--faint); text-align: right; user-select: none; }
+.code-editor .gutter, .code-editor .hl, .code-editor textarea.code {
+  font-family: var(--mono); font-size: 13px; line-height: 20px; tab-size: 2; letter-spacing: 0; }
+.code-editor .gutter > div { padding: 10px 10px 10px 14px; white-space: pre; min-width: 3.25rem; }
+.code-editor .code-area { position: relative; overflow: hidden; }
+.code-editor .hl { position: absolute; inset: 0; margin: 0; overflow: hidden; pointer-events: none; color: var(--text); }
+.code-editor .hl code { display: block; padding: 10px 12px; white-space: pre; font: inherit; will-change: transform; }
+.code-editor.enhanced textarea.code { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; margin: 0;
+  padding: 10px 12px; border: 0; border-radius: 0; outline: none; box-shadow: none; resize: none; background: transparent;
+  color: transparent; caret-color: var(--navy); white-space: pre; overflow: auto; overflow-wrap: normal; }
+.code-editor.enhanced textarea.code::selection { background: rgba(0, 105, 255, .22); color: transparent; }
+.code-editor.enhanced textarea.code:focus { box-shadow: none; }
+.t-c { color: #7a869c; font-style: italic; }
+.t-s { color: #157a3a; }
+.t-k { color: #0053cc; font-weight: 600; }
+.t-n { color: #b45309; }
+.t-a { color: #6d3fc0; }
+.t-v { color: #0069ff; }
+.t-i { color: #b4410c; background: var(--amber-tint); border-radius: 2px; }
+.editor-status { display: flex; gap: 1.25rem; justify-content: flex-end; padding: .35rem .25rem; color: var(--muted);
+  font-size: 12px; }
+.editor-status .dirty { color: var(--amber); font-weight: 600; }
+.editor-status span:first-child { margin-right: auto; }
+.new-def { margin-bottom: 1.5rem; }
+.new-def > summary { cursor: pointer; list-style: none; justify-content: flex-start; gap: .5rem; font-weight: 600; }
+.new-def > summary::-webkit-details-marker { display: none; }
+.new-def > summary::before { content: "+"; color: var(--blue); width: 1ch; }
+.new-def[open] > summary::before { content: "–"; }
+.new-def:not([open]) > summary { border-bottom: 0; }

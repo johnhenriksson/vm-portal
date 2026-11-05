@@ -1,0 +1,45 @@
+# Image definition manifest: how vm-portal builds and uses this image.
+# See images/README.md for the contract between the portal and definitions.
+name: Debian 13 + Docker
+description: >-
+  Debian 13 (trixie) with Docker Engine and Compose, open-vm-tools and
+  cloud-init. Installed over the network from the netinst ISO with a preseed
+  file, which build VMs fetch from the portal over HTTP (Packer opens a port
+  between 8000 and 9000 on the Docker host during the build). Root volume
+  grows to the VM's disk on boot.
+os:
+  family: linux
+  distro: debian
+  version: "13"
+guest: cloud-init
+features: [docker]
+template_prefix: debian-13-docker
+login_user_parameter: ssh_username
+network_interface: eth0      # the template uses net.ifnames=0 (see scripts/cleanup.sh)
+build:
+  cpus: 2
+  memory_mb: 2048
+  disk_mb: 25600
+iso:
+  hint: Debian 13 netinst ISO (amd64)
+  match: "debian-13*-amd64-netinst.iso"
+parameters:
+  - name: ssh_username
+    label: Login user
+    help: User created in the template; VMs get their SSH keys for it.
+    default: debian
+    pattern: "^[a-z_][a-z0-9_-]{0,31}$"
+  - name: keyboard_layout
+    label: Keyboard layout
+    help: XKB layout code for the console, e.g. us, se, de.
+    default: us
+    pattern: "^[a-z]{2,3}$"
+  - name: locale
+    label: Locale
+    default: en_US.UTF-8
+    pattern: "^[a-z]{2,3}_[A-Z]{2}\\.UTF-8$"
+  - name: guest_os_type
+    label: vSphere guest OS type
+    help: debian12_64Guest needs vSphere 8; use debian11_64Guest on vSphere 7.
+    default: debian12_64Guest
+    pattern: "^[a-z][a-zA-Z0-9_]{2,40}Guest$"

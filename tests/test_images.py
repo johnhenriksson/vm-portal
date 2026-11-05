@@ -6,11 +6,11 @@ from pydantic import ValidationError
 
 from app import images
 
-BASE = {"name": "Test", "os": {"family": "linux", "distro": "debian", "version": "13"},
-        "guest": "cloud-init", "template_prefix": "debian-13"}
+BASE = {"name": "Test", "os": {"family": "linux", "distro": "testos", "version": "1"},
+        "guest": "cloud-init", "template_prefix": "acme-1"}
 
 
-def make_custom(data_dir, image_id="debian-13", **manifest):
+def make_custom(data_dir, image_id="acme-1", **manifest):
     d = data_dir / "images" / image_id
     d.mkdir(parents=True)
     (d / "image.yaml").write_text(yaml.safe_dump({**BASE, **manifest}))
@@ -42,15 +42,15 @@ def test_manifest_validation(bad):
 def test_custom_images_and_conflicts(data_dir):
     make_custom(data_dir)
     make_custom(data_dir, "ubuntu-26.04")                       # id clash with built-in
-    make_custom(data_dir, "dup-prefix", template_prefix="debian-13")
+    make_custom(data_dir, "dup-prefix", template_prefix="acme-1")
     cat = images.catalog()
     by_id = {i.id: i for i in cat if i.builtin or i.id != "ubuntu-26.04"}
-    assert by_id["debian-13"].usable and not by_id["debian-13"].builtin
+    assert by_id["acme-1"].usable and not by_id["acme-1"].builtin
     clash = next(i for i in cat if i.id == "ubuntu-26.04" and not i.builtin)
     assert "built-in" in clash.error and images.get("ubuntu-26.04").builtin
     cat = {i.id: i for i in cat if i.id != "ubuntu-26.04"}
     assert "already used" in cat["dup-prefix"].error
-    assert "debian-13" in images.template_prefixes()
+    assert "acme-1" in images.template_prefixes()
 
 
 def test_parameters_are_validated():
@@ -80,3 +80,13 @@ def test_fresh_install_has_no_migration():
     from app import db
     images.migrate_legacy()
     assert db.one("SELECT 1 FROM image_settings") is None
+
+
+def test_all_builtin_definitions_are_valid():
+    builtin = {i.id: i for i in images.catalog() if i.builtin}
+    assert {"ubuntu-26.04", "debian-13", "rocky-10"} <= set(builtin)
+    for img in builtin.values():
+        assert img.usable, img.error
+    assert builtin["debian-13"].manifest.network_interface == "eth0"
+    assert builtin["rocky-10"].manifest.features == []
+    assert builtin["ubuntu-26.04"].manifest.network_interface == "en*"

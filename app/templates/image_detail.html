@@ -70,12 +70,12 @@
   <div class="card-head">Duplicate</div>
   <div class="card-body">
     <p class="muted">Copy this definition to a custom one you can edit, e.g. to make a variant or start a new OS.</p>
-    <form method="post" action="/images/defs/{{ img.id }}/duplicate">
+    <form method="post" action="/images/defs/{{ img.id }}/duplicate" data-slug-form>
       {{ csrf_field(request) }}
       <div class="grid-3">
-        <label class="field"><span class="label">New id</span><input name="new_id" required pattern="[a-z0-9][a-z0-9.\-]{1,47}" placeholder="debian-13" class="mono"></label>
-        <label class="field"><span class="label">Name</span><input name="name" required maxlength="80" placeholder="Debian 13"></label>
-        <label class="field"><span class="label">Template prefix</span><input name="template_prefix" required placeholder="debian-13" class="mono"></label>
+        <label class="field"><span class="label">New id</span><input name="new_id" required pattern="[a-z0-9][a-z0-9.\-]{1,47}" placeholder="{{ img.id }}-custom" class="mono" data-slug-target autocomplete="off"></label>
+        <label class="field"><span class="label">Name</span><input name="name" required maxlength="80" placeholder="{{ img.manifest.name if img.manifest else '' }} (custom)" data-slug-source></label>
+        <label class="field"><span class="label">Template prefix</span><input name="template_prefix" required placeholder="{{ img.id }}-custom" class="mono" data-slug-target autocomplete="off"></label>
       </div>
       <button class="btn-outline">Duplicate</button>
     </form>

@@ -37,6 +37,7 @@ class VMRequest:
     guest: str = guests.DEFAULT                 # guest driver (from the image definition)
     features: tuple[str, ...] = ("docker",)     # image features (from the image definition)
     image_id: str | None = None
+    network_interface: str = "en*"              # template's NIC name or glob (from the image definition)
 
 
 def validate_name(name: str) -> str:

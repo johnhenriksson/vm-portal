@@ -94,3 +94,11 @@ def test_console_password_hash_and_userdata():
 def test_metadata_redacts_userdata_in_vcenter():
     md = yaml.safe_load(provision.render_metadata(req()))
     assert md["redact"] == ["userdata"] and md["cleanup-guestinfo"] == ["userdata"]
+
+
+def test_metadata_static_with_exact_interface_name():
+    # Debian (ifupdown) and Rocky (NetworkManager) templates name the NIC eth0: no glob match.
+    md = yaml.safe_load(provision.render_metadata(req(ip="10.0.0.20", network_interface="eth0")))
+    eth = md["network"]["ethernets"]
+    assert list(eth) == ["eth0"] and "match" not in eth["eth0"]
+    assert eth["eth0"]["addresses"] == ["10.0.0.20/24"]

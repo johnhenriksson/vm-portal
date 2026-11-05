@@ -3,14 +3,17 @@
 Security model
   * Editing Packer definitions is running code: a definition can execute
     commands in the portal container (shell-local), read files (file()) and
-    environment variables (env()). So writing is off unless the operator sets
-    ALLOW_IMAGE_EDITING=true, is admin-only, and every change is audited and
-    snapshotted. Packer runs with a minimal environment (jobs.child_env).
+    environment variables (env()). So writing is off by default, admin-only, and
+    every change is audited and snapshotted. An admin turns it on under
+    Settings → Images, confirming with their password; ALLOW_IMAGE_EDITING=false
+    in the environment locks it off. Packer runs with a minimal environment
+    (jobs.child_env).
   * Built-in definitions are read-only; duplicate one to customise it.
   * Paths are validated component by component (no "..", no hidden files, no
     symlinks), file types are allowlisted, and sizes are capped.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -27,7 +30,7 @@ from pydantic import ValidationError
 
 from . import db, images, jobs
 from .auth import client_ip, require_admin
-from .config import PREFIX_RE, get_bootstrap
+from .config import CONTROL_RE, PREFIX_RE, get_settings
 
 log = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -46,7 +49,7 @@ KEEP_SNAPSHOTS = 20
 
 
 def editing_enabled() -> bool:
-    return get_bootstrap().allow_image_editing
+    return get_settings().allow_image_editing
 
 
 def render(*args, **kwargs):
@@ -101,7 +104,7 @@ def list_files(img: images.ImageDef) -> list[str]:
 
 def _require_editable(img: images.ImageDef) -> None:
     if not editing_enabled():
-        raise HTTPException(403, "Editing image definitions is disabled (set ALLOW_IMAGE_EDITING=true)")
+        raise HTTPException(403, "Editing image definitions is disabled (Settings → Images)")
     if img.builtin:
         raise HTTPException(403, "Built-in image definitions are read-only. Duplicate it to make changes.")
 
@@ -120,7 +123,7 @@ def history_dir(image_id: str) -> Path:
 def snapshot(img: images.ImageDef) -> None:
     """Copy the definition aside before a change; keep the newest few."""
     dest = history_dir(img.id) / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    shutil.copytree(img.path, dest, ignore=shutil.ignore_patterns(".*", "packer_cache"))
+    shutil.copytree(img.path, dest, ignore=_copy_ignore)
     for old in sorted(history_dir(img.id).iterdir())[:-KEEP_SNAPSHOTS]:
         shutil.rmtree(old, ignore_errors=True)
 
@@ -132,6 +135,26 @@ def _write(path: Path, content: str) -> None:
         fh.write(content)
     os.chmod(tmp, 0o640)
     os.replace(tmp, path)
+
+
+_IGNORE = shutil.ignore_patterns(".*", "*.pkrvars.*", "packer.log", "packer_cache", "crash.log")
+
+
+def _copy_ignore(directory: str, names: list[str]) -> set[str]:
+    """Skip hidden files, local variable files and caches, and never follow a symlink out of the definition."""
+    return set(_IGNORE(directory, names)) | {n for n in names if os.path.islink(os.path.join(directory, n))}
+
+
+def rename_manifest(text: str, name: str, template_prefix: str) -> str:
+    """Set name and template_prefix, keeping the manifest's comments and layout."""
+    out, n = re.subn(r"(?m)^name:.*$", lambda _: "name: " + json.dumps(name), text, count=1)
+    out, p = re.subn(r"(?m)^template_prefix:.*$", lambda _: "template_prefix: " + template_prefix, out, count=1)
+    data = yaml.safe_load(out) if n and p else None
+    if not isinstance(data, dict) or data.get("name") != name or data.get("template_prefix") != template_prefix:
+        data = yaml.safe_load(text) or {}
+        data.update(name=name, template_prefix=template_prefix)
+        return yaml.safe_dump(data, sort_keys=False)
+    return out
 
 
 def check_content(img: images.ImageDef, rel: str, content: str) -> None:
@@ -153,20 +176,49 @@ def check_content(img: images.ImageDef, rel: str, content: str) -> None:
             raise ValueError(f"image.yaml is invalid: {e}") from None
 
 
-def packer_syntax_check(img: images.ImageDef) -> tuple[bool, str]:
-    """`packer validate -syntax-only` on a copy: parses HCL without evaluating or running anything."""
+def validation_env(img: images.ImageDef) -> dict[str, str]:
+    """The variables a build would get, minus the secret: validating never connects to vCenter."""
+    from . import packer
+    cfg = images.config(img)
+    if not cfg.iso_url:
+        cfg = cfg.model_copy(update={"iso_url": "[datastore] iso/not-chosen-yet.iso"})
+    env = packer.packer_env(img, cfg, f"{img.manifest.template_prefix}-validate")
+    env["PKR_VAR_vsphere_password"] = "not-used-by-validate"
+    # Builders require these; placeholders let a definition be checked before vCenter is set up.
+    for key in ("server", "user", "datacenter", "cluster", "datastore", "network"):
+        env[f"PKR_VAR_vsphere_{key}"] = env[f"PKR_VAR_vsphere_{key}"] or "not-configured"
+    return env
+
+
+def packer_check(img: images.ImageDef) -> tuple[bool, str]:
+    """`packer validate` on a copy, first syntax only, then with the portal's variables.
+
+    Validating evaluates variables, locals and templatefile() (so it catches a
+    missing variable or a broken installer template) but runs no builder or
+    provisioner and doesn't contact vCenter.
+    """
     if not shutil.which("packer"):
-        return True, "packer is not installed; syntax not checked"
+        return True, "packer is not installed; not checked"
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp) / "def"
-        shutil.copytree(img.path, work, ignore=shutil.ignore_patterns(".*", "*.pkrvars.*", "packer_cache"))
-        try:
-            r = subprocess.run(["packer", "validate", "-syntax-only", "."], cwd=work, env=jobs.child_env(),
-                               capture_output=True, text=True, timeout=30)
-        except subprocess.TimeoutExpired:
-            return False, "packer validate timed out"
-    out = (r.stdout + r.stderr).strip()
-    return r.returncode == 0, out or "Syntax OK"
+        shutil.copytree(img.path, work, ignore=_copy_ignore)
+        steps = [("Syntax", ["packer", "validate", "-syntax-only", "."], jobs.child_env())]
+        note = ""
+        if img.usable:
+            try:
+                steps.append(("With the portal's variables", ["packer", "validate", "."],
+                              jobs.child_env(validation_env(img))))
+            except (OSError, ValueError) as e:
+                note = f"\nNot checked with the portal's variables: {e}"
+        for label, cmd, env in steps:
+            try:
+                r = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                return False, f"{label}: packer validate timed out"
+            out = (r.stdout + r.stderr).strip()
+            if r.returncode != 0:
+                return False, f"{label}: failed\n\n{out}"
+    return True, "\n".join(f"{label}: OK" for label, *_ in steps) + note
 
 
 # --- pages ------------------------------------------------------------------------------
@@ -217,7 +269,7 @@ async def save_file(request: Request, image_id: str, user: dict = Depends(requir
     _write(target, content)
     _audit(request, user, "image.file_saved", f"{img.id}/{path}")
     img = images.get(img.id) or img
-    ok, out = await asyncio.to_thread(packer_syntax_check, img)
+    ok, out = await asyncio.to_thread(packer_check, img)
     return page(request, img, path, notice=f"Saved {path}.", check_ok=ok, check_output=out)
 
 
@@ -256,7 +308,7 @@ async def delete_file(request: Request, image_id: str, user: dict = Depends(requ
 @router.post("/images/defs/{image_id}/validate")
 async def validate(request: Request, image_id: str, path: str = Form(images.MANIFEST)):
     img = _image_or_404(image_id)
-    ok, out = await asyncio.to_thread(packer_syntax_check, img)
+    ok, out = await asyncio.to_thread(packer_check, img)
     return page(request, img, path, check_ok=ok, check_output=out)
 
 
@@ -274,7 +326,7 @@ async def restore(request: Request, image_id: str, snap: str, user: dict = Depen
     await asyncio.to_thread(snapshot, img)
     tmp = img.path.with_name(f".restore-{img.id}")
     shutil.rmtree(tmp, ignore_errors=True)
-    shutil.copytree(src, tmp)
+    shutil.copytree(src, tmp, ignore=_copy_ignore)
     shutil.rmtree(img.path)
     tmp.rename(img.path)
     _audit(request, user, "image.restored", f"{img.id} to {snap}")
@@ -283,12 +335,23 @@ async def restore(request: Request, image_id: str, snap: str, user: dict = Depen
 
 # --- whole definitions ---------------------------------------------------------------------
 
+@router.post("/images/defs/new")
+async def new_definition(request: Request, user: dict = Depends(require_admin), source: str = Form(...),
+                         new_id: str = Form(...), name: str = Form(...), template_prefix: str = Form(...)):
+    """A new custom definition, started from any existing one (built-in starters or custom)."""
+    return create_from(request, user, _image_or_404(source), new_id, name, template_prefix)
+
+
 @router.post("/images/defs/{image_id}/duplicate")
 async def duplicate(request: Request, image_id: str, user: dict = Depends(require_admin),
                     new_id: str = Form(...), name: str = Form(...), template_prefix: str = Form(...)):
-    src = _image_or_404(image_id)
+    return create_from(request, user, _image_or_404(image_id), new_id, name, template_prefix)
+
+
+def create_from(request: Request, user: dict, src: images.ImageDef, new_id: str, name: str,
+                template_prefix: str) -> RedirectResponse:
     if not editing_enabled():
-        raise HTTPException(403, "Editing image definitions is disabled (set ALLOW_IMAGE_EDITING=true)")
+        raise HTTPException(403, "Editing image definitions is disabled (Settings → Images)")
     new_id, template_prefix, name = new_id.strip(), template_prefix.strip(), name.strip()
     catalog = images.catalog()
     errors = []
@@ -300,18 +363,16 @@ async def duplicate(request: Request, image_id: str, user: dict = Depends(requir
         errors.append("The template prefix must be 3-64 lowercase letters, digits, '.', '_' or '-'")
     if any(i.usable and i.manifest.template_prefix == template_prefix for i in catalog):
         errors.append(f"The template prefix {template_prefix!r} is already used")
-    if not name or len(name) > 80:
-        errors.append("Give it a name (at most 80 characters)")
+    if not name or len(name) > 80 or CONTROL_RE.search(name):
+        errors.append("Give it a name (one line, at most 80 characters)")
     if errors:
         raise HTTPException(400, "; ".join(errors))
     dest = images.custom_dir() / new_id
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src.path, dest, ignore=shutil.ignore_patterns(".*", "*.pkrvars.*", "packer.log",
-                                                                  "packer_cache", "crash.log"), symlinks=False)
-    manifest = yaml.safe_load((dest / images.MANIFEST).read_text()) or {}
-    manifest.update(name=name, template_prefix=template_prefix)
-    _write(dest / images.MANIFEST, "# Duplicated from " + src.id + "\n" + yaml.safe_dump(manifest, sort_keys=False))
-    _audit(request, user, "image.duplicated", f"{src.id} -> {new_id}")
+    shutil.copytree(src.path, dest, ignore=_copy_ignore)
+    path = dest / images.MANIFEST
+    _write(path, f"# Created from {src.id}\n" + rename_manifest(path.read_text(encoding="utf-8"), name, template_prefix))
+    _audit(request, user, "image.created", f"{src.id} -> {new_id}")
     return RedirectResponse(f"/images/defs/{new_id}/files", status_code=303)
 
 

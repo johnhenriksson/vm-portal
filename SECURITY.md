@@ -12,11 +12,15 @@ vm-portal holds powerful credentials (a vCenter account) and runs Terraform/Open
 and Packer. Treat it like infrastructure tooling:
 
 - **Admins are fully trusted.** They configure vCenter, manage users and build
-  images. With `ALLOW_IMAGE_EDITING=true` they can also edit Packer definitions,
-  which is equivalent to running code inside the portal container.
+  images. With image editing turned on (Settings → Images) they can also edit
+  Packer definitions, which is equivalent to running code inside the portal
+  container. Turning it on requires the admin's password and is audited; set
+  `ALLOW_IMAGE_EDITING=false` in the environment to make sure it stays off.
 - **Users** can create, power and destroy their own VMs and open their consoles.
   They can't see other users' VMs or jobs, settings, images or the audit log.
-- Put the portal behind HTTPS (a reverse proxy) and set `HTTPS_ONLY_COOKIES=true`.
+- Put the portal behind HTTPS (a reverse proxy) and turn on *HTTPS only* under
+  Settings → Security (or set `HTTPS_ONLY_COOKIES=true`). The portal only lets
+  you turn it on from an HTTPS connection, so it can't lock everyone out.
   Don't expose it to the internet unless you have to.
 - Use a dedicated vCenter account with only the permissions in the README.
 - Back up the data volume and keep the backup as secret as the vCenter password:
@@ -30,6 +34,8 @@ and Packer. Treat it like infrastructure tooling:
   role or account status changes.
 - CSRF tokens on every form; strict Content Security Policy (no inline scripts);
   `X-Frame-Options: DENY`, `no-store` caching, HSTS behind HTTPS.
+- Turning on a sensitive switch (image editing, HTTPS only) needs the admin's
+  password, so a stolen session can't quietly do it.
 - Secrets encrypted at rest (Fernet) and never sent back to the browser;
   changing the vCenter server requires re-entering its password.
 - Child processes (OpenTofu, Packer) get a minimal environment, never the

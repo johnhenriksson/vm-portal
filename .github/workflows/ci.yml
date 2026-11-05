@@ -32,15 +32,10 @@ jobs:
       - name: Validate the built-in image definitions with the bundled Packer
         run: |
           docker run --rm -e DATA_DIR=/tmp/d -e PYTHONPATH=/app --entrypoint python vm-portal:ci -c "
-          import os, subprocess
-          from app import images, packer
+          from app import editor, images
           for img in images.catalog():
               assert img.usable, (img.id, img.error)
-              env = packer.packer_env(img, images.config(img), img.manifest.template_prefix + '-ci')
-              for k in [k for k in env if env[k] == '']:
-                  env[k] = 'x'
-              r = subprocess.run(['packer', 'validate', '.'], cwd=img.path, env={**os.environ, **env},
-                                 capture_output=True, text=True)
-              print(img.id, r.stdout.strip(), r.stderr.strip())
-              assert r.returncode == 0
+              ok, out = editor.packer_check(img)  # syntax, then with the portal's variables
+              print(img.id, out)
+              assert ok
           "

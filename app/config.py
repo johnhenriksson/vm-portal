@@ -37,16 +37,12 @@ class Bootstrap(BaseSettings):
     # unset. Setting ENCRYPTION_KEY keeps the key out of the data volume (and its backups).
     secret_key: str = ""
     encryption_key: str = ""
-    https_only_cookies: bool = False
     # Only used to create the first admin when there are no users yet.
     admin_username: str = "admin"
     admin_password: str = ""
 
     # Built-in image definitions (read-only, shipped with the app). Custom ones live in data_dir/images.
     images_dir: Path = APP_DIR.parent / "images"
-    # Editing image definitions in the web UI lets admins run arbitrary Packer code
-    # inside the portal (shell-local, file(), env()...). Off unless the operator opts in.
-    allow_image_editing: bool = False
     # Private key Packer logs in with. Unset: the portal generates one in data_dir.
     packer_ssh_key: Path | None = None
     terraform_module_dir: Path = APP_DIR.parent / "terraform" / "vm"
@@ -109,6 +105,18 @@ class Settings(Bootstrap):
     ip_dns: Annotated[list[str], NoDecode] = []
     ip_scan_use_arp: bool = True
 
+    # Images. Editing definitions in the web UI lets admins run arbitrary Packer code
+    # inside the portal (shell-local, file(), env()...), so it is off by default and
+    # turning it on needs the admin's password (see admin.py).
+    allow_image_editing: bool = False
+    # Address build VMs use to fetch files from Packer's HTTP server (e.g. a Debian
+    # preseed). Empty: the address the portal uses to reach vCenter.
+    packer_http_ip: str = ""
+
+    # Security. Turning https_only_cookies on is only allowed over HTTPS (admin.py),
+    # so it can't lock everyone out; HTTPS_ONLY_COOKIES=false in the environment
+    # overrides it if it ever does.
+    https_only_cookies: bool = False
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings,
@@ -163,7 +171,7 @@ class Settings(Bootstrap):
                 raise ValueError(f"not a valid SSH public key: {k[:40]}…")
         return list(dict.fromkeys(v))
 
-    @field_validator("ip_pool_start", "ip_pool_end", "ip_gateway")
+    @field_validator("ip_pool_start", "ip_pool_end", "ip_gateway", "packer_http_ip")
     @classmethod
     def _ip(cls, v: str) -> str:
         v = v.strip()
@@ -199,7 +207,8 @@ SECTIONS: dict[str, list[str]] = {
     "network": ["ip_pool_start", "ip_pool_end", "ip_prefix", "ip_gateway", "ip_dns", "ip_scan_use_arp"],
     "vms": ["vm_user", "default_cpus", "default_memory_mb", "default_disk_gb"],
     "ssh-keys": ["default_ssh_keys"],
-    "templates": ["template_prefixes", "template_max_age_days"],
+    "templates": ["template_prefixes", "template_max_age_days", "packer_http_ip", "allow_image_editing"],
+    "security": ["https_only_cookies"],
 }
 EDITABLE = {f for fields in SECTIONS.values() for f in fields}
 SECRET_FIELDS = {"vsphere_password"}

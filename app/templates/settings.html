@@ -12,7 +12,7 @@
   {% endfor %}
 </nav>
 
-{% if importable and section not in ("users", "audit") %}
+{% if importable and section not in ("users", "audit", "system") %}
 <div class="alert warn row" style="justify-content:space-between">
   <span>{{ importable | length }} setting(s) come from environment variables and can't be edited here.
     Save them to the portal's encrypted settings, then remove them from the environment.</span>
@@ -30,12 +30,22 @@
     <p class="muted">Each image's ISO, sizes and parameters are set on its page under
       <a href="/images?tab=definitions">Images → Image definitions</a>.</p>
     <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
+  {% elif section == "security" %}
+    <p class="muted">Passwords, sessions and the browser console are always protected; see SECURITY.md for the details.
+      {% if not is_https %}<br>You're using the portal over plain HTTP right now. Put it behind a reverse proxy with
+      HTTPS, open it through that, then turn this on.{% endif %}</p>
+    {% for f in fields %}{{ field(f) }}{% endfor %}
   {% elif section == "network" %}
     <p class="muted">Static IPs are offered from this pool. Leave the pool empty to only allow DHCP.</p>
     <div class="grid-2">{% for f in fields[:-1] %}{{ field(f) }}{% endfor %}</div>
     {{ field(fields[-1]) }}
   {% else %}
     <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
+  {% endif %}
+  {% if confirm_fields %}
+  <label class="field confirm-field"><span class="label">Your password</span>
+    <input type="password" name="confirm_password" autocomplete="current-password" maxlength="256">
+    <span class="hint">Only needed to turn on: {{ confirm_fields | join(", ") }}</span></label>
   {% endif %}
   <div class="row form-actions">
     <button type="submit">Save</button>
@@ -156,6 +166,42 @@
     <button type="submit">Add user</button>
   </div>
 </form>
+{% endif %}
+
+{% if section == "system" %}
+<p class="muted">Everything else is configured on the other tabs. These values have to exist before the
+  portal can open its database, so they can only come from the environment (<code>.env</code> or
+  <code>compose.yaml</code>); restart the container after changing them.</p>
+<div class="table-wrap" style="margin-bottom:2rem">
+<table>
+  <thead><tr><th>Setting</th><th>Variable</th><th>Current</th><th>Why it's here</th></tr></thead>
+  <tbody>
+  {% for label, var, value, why in system.env_only %}
+    <tr><td><strong>{{ label }}</strong></td><td><code>{{ var }}</code></td>
+      <td class="mono small">{{ value }}</td><td class="muted">{{ why }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-head">Overridden by the environment</div>
+    <div class="card-body">
+      {% if system.overrides %}
+        <p class="muted">These are read-only on their tabs. Use <em>Import from environment</em> to move them into the portal.</p>
+        <p>{% for k in system.overrides %}<code>{{ k | upper }}</code>{{ ", " if not loop.last }}{% endfor %}</p>
+      {% else %}<p class="muted">None: every setting is managed here.</p>{% endif %}
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head">Status</div>
+    <div class="card-body">
+      <p>Connection: {% if system.https %}<span class="badge ready plain">HTTPS</span>{% else %}<span class="badge failed plain">Plain HTTP</span>{% endif %}</p>
+      <p>Tools: {% for t, ok in system.tools.items() %}<code>{{ t }}</code> {{ "✓" if ok else "missing" }}{{ " · " if not loop.last }}{% endfor %}</p>
+    </div>
+  </div>
+</div>
 {% endif %}
 
 {% if section == "audit" %}

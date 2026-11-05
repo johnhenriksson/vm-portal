@@ -68,12 +68,18 @@
     });
   });
 
-  // Code editor: Tab inserts two spaces instead of leaving the textarea.
-  document.addEventListener("keydown", (e) => {
-    const ta = e.target;
-    if (e.key !== "Tab" || !ta.matches("textarea.code") || ta.readOnly || e.shiftKey) return;
-    e.preventDefault();
-    ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end");
+  // Name -> id fields: <form data-slug-form> fills [data-slug-target] from [data-slug-source]
+  // until the user edits a target themselves.
+  document.querySelectorAll("[data-slug-form]").forEach((f) => {
+    const src = f.querySelector("[data-slug-source]");
+    const targets = [...f.querySelectorAll("[data-slug-target]")];
+    if (!src) return;
+    targets.forEach((t) => t.addEventListener("input", () => { t.dataset.touched = "1"; }));
+    src.addEventListener("input", () => {
+      const slug = src.value.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9.]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 48);
+      targets.forEach((t) => { if (!t.dataset.touched) t.value = slug; });
+    });
   });
 
   // Select-on-click for read-only inputs.

@@ -1,0 +1,44 @@
+# Image definition manifest: how vm-portal builds and uses this image.
+# See images/README.md for the contract between the portal and definitions.
+name: Rocky Linux 10
+description: >-
+  Rocky Linux 10 (RHEL compatible) with open-vm-tools and cloud-init. SELinux
+  enforcing, firewalld allowing SSH only. Installed from the boot, minimal or
+  DVD ISO with packages from the Rocky mirrors. Needs CPUs with x86-64-v3
+  (AVX2): check your cluster's EVC mode. Root volume grows to the VM's disk on boot.
+os:
+  family: linux
+  distro: rocky
+  version: "10"
+guest: cloud-init
+features: []
+template_prefix: rocky-10
+login_user_parameter: ssh_username
+network_interface: eth0      # the template uses net.ifnames=0 (see scripts/cleanup.sh)
+build:
+  cpus: 2
+  memory_mb: 2048
+  disk_mb: 25600
+iso:
+  hint: Rocky Linux 10 ISO (x86_64; boot, minimal or dvd)
+  match: "Rocky-10*-x86_64-*.iso"
+parameters:
+  - name: ssh_username
+    label: Login user
+    help: User created in the template; VMs get their SSH keys for it.
+    default: rocky
+    pattern: "^[a-z_][a-z0-9_-]{0,31}$"
+  - name: keyboard_layout
+    label: Keyboard layout
+    help: XKB layout code for the console, e.g. us, se, de.
+    default: us
+    pattern: "^[a-z]{2,3}$"
+  - name: locale
+    label: Locale
+    default: en_US.UTF-8
+    pattern: "^[a-z]{2,3}_[A-Z]{2}\\.UTF-8$"
+  - name: guest_os_type
+    label: vSphere guest OS type
+    help: rhel9_64Guest works on vSphere 7.0 U3 and 8; rhel10_64Guest needs 8.0 U3 or later.
+    default: rhel9_64Guest
+    pattern: "^[a-z][a-zA-Z0-9_]{2,40}Guest$"

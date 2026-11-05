@@ -9,10 +9,12 @@ same web interface. Runs as a single container.
   and an optional `compose.yaml` that starts on first boot
 - **Manage VMs**: power on/off/reboot, destroy, SSH command, and a **browser
   console** (noVNC) that works without access to the ESXi hosts
-- **Images**: a catalog of image definitions (Packer templates). Configure each
+- **Images**: a catalog of image definitions (Packer templates): Ubuntu 26.04
+  + Docker, Debian 13 + Docker and Rocky Linux 10 are built in. Configure each
   one's installer ISO, sizes and parameters; build with a live log; old
-  templates are pruned automatically. Admins can duplicate and edit definitions
-  in the browser when enabled.
+  templates are pruned automatically. With editing turned on, admins create new
+  definitions from any existing one and edit them in a browser editor (syntax
+  colouring, `packer validate` on save, history with restore).
 - **Users**: admins and regular users; users only see their own VMs and jobs
 - **Settings in the UI**: vCenter connection with resource pickers, IP pool,
   default SSH keys; secrets encrypted at rest
@@ -58,23 +60,29 @@ image and build your first template.
 
 Requirements:
 - Linux Docker host. The container uses `network_mode: host` so the IP scanner
-  sees the LAN's ARP table and Packer can reach build VMs.
+  sees the LAN's ARP table and Packer can reach build VMs. Debian builds also
+  need the build VM to reach the Docker host on a TCP port between 8000 and 9000
+  (Packer's HTTP server for the preseed file); open that range in the host's
+  firewall if it has one.
 - vCenter 7 or 8 and a service account (see below). Installer ISOs on a datastore.
-- Behind HTTPS (a reverse proxy) for anything but a lab; then set
-  `HTTPS_ONLY_COOKIES=true`.
+- Behind HTTPS (a reverse proxy) for anything but a lab; then turn on
+  **Settings → Security → HTTPS only** from an HTTPS connection.
 
-Everything is configured in the UI. Optional environment variables (`.env`):
+Everything is configured on the **Settings** page: vCenter, network, VM
+defaults, SSH keys, images (including whether admins may edit image definitions
+in the browser), security (HTTPS only), users and the audit log. The **System**
+tab shows the few values that have to come from the environment, because they're
+needed before the database can be opened. Optional environment variables (`.env`):
 
 | Variable | Purpose |
 |---|---|
 | `PORT` | Listen port (default 8080) |
-| `HTTPS_ONLY_COOKIES` | `true` behind HTTPS (also enables HSTS) |
 | `ENCRYPTION_KEY` | Key for stored secrets; keeps it out of the data volume |
 | `SECRET_KEY` | Session signing key (generated if unset) |
 | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Create the first admin without the setup token |
-| `ALLOW_IMAGE_EDITING` | `true` lets admins create and edit image definitions in the browser |
 | `PACKER_SSH_KEY` | Use your own build key instead of the generated one |
-| Any setting, e.g. `VSPHERE_SERVER` | Overrides the UI; shown read-only there |
+| `FORWARDED_ALLOW_IPS` | Reverse proxies trusted for `X-Forwarded-*` (default `127.0.0.1`) |
+| Any setting, e.g. `VSPHERE_SERVER` | Overrides the UI; shown read-only there. Use it to pin security switches such as `ALLOW_IMAGE_EDITING=false` or `HTTPS_ONLY_COOKIES=true` |
 
 The data volume (`portal-data`) holds the database, keys, OpenTofu state and
 logs. **Back it up**, and treat backups as secret: the state is how the portal
@@ -105,8 +113,10 @@ See [`SECURITY.md`](SECURITY.md) for the threat model and how to report issues.
 - **Processes**: OpenTofu and Packer run with a minimal environment, never the
   portal's own secrets. The container runs as uid 1000 with only `NET_RAW`.
 - **Image editing** is off by default. Packer definitions are code (they can
-  run commands in the container), so only enable `ALLOW_IMAGE_EDITING` if you
-  trust every admin with that. Every change is audited and snapshotted.
+  run commands in the container), so only turn it on (Settings → Images, which
+  asks for your password) if you trust every admin with that. Every change is
+  audited and snapshotted. `ALLOW_IMAGE_EDITING=false` in the environment keeps
+  it off whatever the UI says.
 
 ## vCenter service account
 
@@ -156,7 +166,7 @@ that section before offering vm-portal to third parties.
 
 ## Roadmap
 
-- More image definitions (Debian, Rocky/RHEL, Windows with a sysprep guest driver)
+- Windows images (needs a sysprep or cloudbase-init guest driver)
 - NetBox as IPAM provider
 - Re-deploy or edit the compose app on an existing VM
 - OIDC login

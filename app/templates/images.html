@@ -22,6 +22,38 @@
   <div class="alert warn"><strong>Builds can't run yet:</strong>
     <ul>{% for p in shared_problems %}<li>{{ p }}</li>{% endfor %}</ul></div>
   {% endif %}
+  {% if editing_enabled %}
+  <details class="card new-def" {% if not defs | selectattr("img.builtin", "false") | list %}open{% endif %}>
+    <summary class="card-head">New image definition</summary>
+    <div class="card-body">
+      <p class="muted">Start from an existing definition: you get an editable copy with all its files, then
+        change the installer answers and scripts in the editor. Pick the closest OS: Ubuntu (autoinstall),
+        Debian (preseed) or Rocky Linux (kickstart, also a good start for RHEL and AlmaLinux).</p>
+      <form method="post" action="/images/defs/new" data-slug-form>
+        {{ csrf_field(request) }}
+        <div class="grid-2">
+          <label class="field"><span class="label">Start from</span>
+            <select name="source" required>
+              {% for d in defs if d.img.usable %}
+              <option value="{{ d.img.id }}">{{ d.img.manifest.name }} ({{ d.img.id }}{{ ", built-in" if d.img.builtin }})</option>
+              {% endfor %}
+            </select></label>
+          <label class="field"><span class="label">Name</span>
+            <input name="name" required maxlength="80" placeholder="AlmaLinux 10" data-slug-source></label>
+          <label class="field"><span class="label">Id</span>
+            <input name="new_id" required pattern="[a-z0-9][a-z0-9.\-]{1,47}" class="mono" placeholder="almalinux-10"
+                   data-slug-target autocomplete="off" spellcheck="false">
+            <span class="hint">Folder name. Lowercase letters, digits, '.' and '-'.</span></label>
+          <label class="field"><span class="label">Template prefix</span>
+            <input name="template_prefix" required pattern="[a-z0-9][a-z0-9._\-]{2,63}" class="mono" placeholder="almalinux-10"
+                   data-slug-target autocomplete="off" spellcheck="false">
+            <span class="hint">Templates are named &lt;prefix&gt;-YYYYMMDD-HHMM.</span></label>
+        </div>
+        <button>Create and open editor</button>
+      </form>
+    </div>
+  </details>
+  {% endif %}
   <div class="def-grid">
   {% for d in defs %}
     {% set m = d.img.manifest %}
@@ -59,8 +91,8 @@
       <div><strong class="label" style="color:var(--blue)">Definitions</strong>
         <p>Each image is a Packer template plus an <code>image.yaml</code> manifest: OS, guest setup, template prefix and settings.</p></div>
       <div><strong class="label" style="color:var(--blue)">Custom images</strong>
-        <p>{% if editing_enabled %}Open a definition and use <em>Duplicate</em> to start a custom one you can edit here.
-          {% else %}Editing in the browser is off. Set <code>ALLOW_IMAGE_EDITING=true</code> to allow admins to create and edit definitions.{% endif %}</p></div>
+        <p>{% if editing_enabled %}Use <em>New image definition</em> above, or <em>Duplicate</em> on a definition's page, to start a custom one you can edit here.
+          {% else %}Editing in the browser is off. Turn it on under <a href="/settings/templates">Settings → Images</a> to create and edit definitions.{% endif %}</p></div>
       <div><strong class="label" style="color:var(--blue)">Templates</strong>
         <p>Every build creates a new dated template; the newest is the default for new VMs and old ones are pruned.</p></div>
     </div>

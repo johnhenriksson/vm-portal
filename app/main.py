@@ -28,15 +28,26 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(vsphere.close)
 
 
+class SessionCookies(SessionMiddleware):
+    """Starlette's session middleware, with the Secure flag following the live setting."""
+
+    @property
+    def security_flags(self) -> str:
+        return self._flags + ("; secure" if get_settings().https_only_cookies else "")
+
+    @security_flags.setter
+    def security_flags(self, value: str) -> None:
+        self._flags = value
+
+
 boot = get_bootstrap()
 app = FastAPI(title="VM Portal", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
               dependencies=[Depends(csrf_protect)])
 app.add_middleware(
-    SessionMiddleware,
+    SessionCookies,
     secret_key=boot.secret_key or crypto.session_key(),
     session_cookie="vmportal_session",
     same_site="strict",
-    https_only=boot.https_only_cookies,
     max_age=60 * 60 * 12,
 )
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
@@ -64,7 +75,7 @@ async def security_headers(request: Request, call_next):
     h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if not request.url.path.startswith("/static/"):
         h.setdefault("Cache-Control", "no-store")
-    if boot.https_only_cookies:
+    if get_settings().https_only_cookies:
         h.setdefault("Strict-Transport-Security", "max-age=31536000")
     return response
 
@@ -87,7 +98,7 @@ async def _http_error(request: Request, exc: StarletteHTTPException):
 def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
     s = get_settings()
     base = {"settings": PublicSettings(s), "current_user": current_user(request),
-            "vcenter_ready": vcenter_configured(s), "editing_enabled": get_bootstrap().allow_image_editing}
+            "vcenter_ready": vcenter_configured(s), "editing_enabled": s.allow_image_editing}
     return templates.TemplateResponse(request, name, {**base, **ctx}, status_code=status_code)
 
 
@@ -304,7 +315,8 @@ async def vm_create(
     req = provision.VMRequest(name=name, template=template, cpus=cpus, memory_mb=memory_mb,
                               disk_gb=disk_gb, ip=static_ip, ssh_keys=keys, compose_yaml=compose,
                               console_password_hash=console_hash, login_user=images.login_user(img, cfg),
-                              guest=driver.name, features=features, image_id=img.id if img else None)
+                              guest=driver.name, features=features, image_id=img.id if img else None,
+                              network_interface=img.manifest.network_interface if img and img.usable else "en*")
     try:
         job_id = provision.create(req, owner_id=user["id"])
     except ValueError as e:

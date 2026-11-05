@@ -30,7 +30,7 @@ RESERVED_VARS = {
     "vsphere_server", "vsphere_user", "vsphere_password", "vsphere_insecure", "vsphere_datacenter",
     "vsphere_cluster", "vsphere_datastore", "vsphere_network", "vsphere_folder", "vm_name",
     "template_prefix", "iso_url", "vm_cpu_num", "vm_mem_size", "vm_disk_size",
-    "ssh_private_key_file", "ssh_authorized_keys",
+    "ssh_private_key_file", "ssh_authorized_keys", "http_ip",
 }
 
 
@@ -94,6 +94,9 @@ class Manifest(_Strict):
     template_prefix: str
     login_user: str | None = None             # fixed login user, or …
     login_user_parameter: str | None = None   # … the parameter that sets it
+    # Name of the template's network interface, for static IPs. A glob ("en*") is
+    # matched by netplan (Ubuntu); other renderers need the exact name (e.g. "eth0").
+    network_interface: str = Field("en*", pattern=r"^[a-z][a-z0-9]{0,14}\*?$")
     build: BuildDefaults = BuildDefaults()
     iso: IsoSpec = IsoSpec()
     parameters: list[Parameter] = Field([], max_length=20)

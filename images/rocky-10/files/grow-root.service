@@ -1,0 +1,12 @@
+[Unit]
+Description=Grow root LVM volume to fill the disk
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/grow-root
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

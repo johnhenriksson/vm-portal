@@ -27,11 +27,15 @@ class CloudInit:
             "cleanup-guestinfo": ["userdata"],  # name used by older cloud-init versions
         }
         if req.ip:
+            iface = req.network_interface
+            # netplan matches a glob; other renderers (ifupdown, NetworkManager) only use the key as
+            # the interface name, so images for those give the exact name.
+            key, match = ("nic0", {"match": {"name": iface}}) if iface.endswith("*") else (iface, {})
             md["network"] = {
                 "version": 2,
                 "ethernets": {
-                    "nic0": {
-                        "match": {"name": "en*"},
+                    key: {
+                        **match,
                         "dhcp4": False,
                         "addresses": [f"{req.ip}/{s.ip_prefix}"],
                         "routes": [{"to": "default", "via": s.ip_gateway}],

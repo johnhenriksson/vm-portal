@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ path }} · {{ img.id }}{% endblock %}
+{% block head %}<script src="/static/editor.js" defer></script>{% endblock %}
 {% block content %}
 <div class="crumbs"><a href="/images?tab=definitions">Image definitions</a> / <a href="/images/defs/{{ img.id }}">{{ img.id }}</a> / files</div>
 <div class="page-head">
@@ -10,7 +11,7 @@
 {% if not editable %}
 <div class="alert warn">
   {% if img.builtin %}Built-in definitions are read-only.{% if editing_enabled %} Use <a href="/images/defs/{{ img.id }}">Duplicate</a> to make an editable copy.{% endif %}
-  {% else %}Editing is disabled. The operator can allow it with <code>ALLOW_IMAGE_EDITING=true</code>.{% endif %}
+  {% else %}Editing is disabled. An admin can turn it on under <a href="/settings/templates">Settings → Images</a>.{% endif %}
 </div>
 {% else %}
 <div class="alert warn">Image definitions are code: Packer runs them inside the portal with access to vCenter.
@@ -47,22 +48,31 @@
   </aside>
 
   <section>
-    <form method="post" action="/images/defs/{{ img.id }}/files/save">
+    <form method="post" action="/images/defs/{{ img.id }}/files/save" data-editor-form>
       {{ csrf_field(request) }}
       <input type="hidden" name="path" value="{{ path }}">
       <div class="row" style="justify-content:space-between;margin-bottom:.5rem">
         <strong class="mono">{{ path }}</strong>
         <span class="row">
-          <button formaction="/images/defs/{{ img.id }}/validate" class="btn-secondary btn-sm">Check syntax</button>
-          {% if editable %}<button class="btn-sm">Save</button>{% endif %}
+          <button formaction="/images/defs/{{ img.id }}/validate" class="btn-secondary btn-sm" data-validate
+                  title="Runs packer validate on the saved files">Validate</button>
+          {% if editable %}<button class="btn-sm" title="Save and validate (Ctrl+S)">Save</button>{% endif %}
         </span>
       </div>
-      <textarea name="content" class="code" spellcheck="false" autocapitalize="off" {% if not editable %}readonly{% endif %}>{{ content }}</textarea>
+      {% if check_output %}
+        <div class="alert {{ 'ok' if check_ok else '' }}" style="margin-bottom:.5rem">packer validate {{ "passed" if check_ok else "failed" }}</div>
+        <pre class="check" style="margin-bottom:1rem">{{ check_output }}</pre>
+      {% endif %}
+      <div class="code-editor" data-path="{{ path }}">
+        <textarea name="content" class="code" spellcheck="false" autocapitalize="off" autocomplete="off"
+                  aria-label="Contents of {{ path }}" {% if not editable %}readonly{% endif %}>{{ content }}</textarea>
+      </div>
+      <div class="editor-status">
+        <span data-editor-state>{{ "Read-only" if not editable else "Saved" }}</span>
+        <span data-editor-pos></span>
+        <span data-editor-mode></span>
+      </div>
     </form>
-    {% if check_output %}
-      <div class="alert {{ 'ok' if check_ok else '' }}" style="margin-top:1rem;margin-bottom:.5rem">packer validate -syntax-only: {{ "passed" if check_ok else "failed" }}</div>
-      <pre class="check">{{ check_output }}</pre>
-    {% endif %}
     {% if editable and path != "image.yaml" %}
     <form method="post" action="/images/defs/{{ img.id }}/files/delete" data-confirm="Delete {{ path }}?" style="margin-top:1rem">
       {{ csrf_field(request) }}<input type="hidden" name="path" value="{{ path }}">
