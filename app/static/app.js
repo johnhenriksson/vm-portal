@@ -3,6 +3,38 @@
 (() => {
   "use strict";
 
+  // Clipboard. navigator.clipboard only exists on secure origins (HTTPS or
+  // localhost); over plain HTTP fall back to copying from a temporary textarea.
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return true; } catch { /* fall back */ }
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  }
+
+  // Briefly show a result on the element that was clicked.
+  function flash(el, text) {
+    if (!el.dataset.label) el.dataset.label = el.textContent;
+    el.textContent = text;
+    clearTimeout(el._flash);
+    el._flash = setTimeout(() => { el.textContent = el.dataset.label; }, 2000);
+  }
+
+  // If copying failed, select the text in a nearby field so Ctrl+C works.
+  function selectFallback(el) {
+    const input = el.closest(".row, .card-body")?.querySelector("input[readonly]");
+    if (input) { input.focus(); input.select(); }
+  }
+
   // Confirm dialogs: <form data-confirm="Really?">
   document.addEventListener("submit", (e) => {
     const msg = e.target.dataset && e.target.dataset.confirm;
@@ -14,11 +46,12 @@
     const copy = e.target.closest("[data-copy]");
     if (copy) {
       e.preventDefault();
-      navigator.clipboard.writeText(copy.dataset.copy).then(() => {
-        if (copy.tagName === "BUTTON") copy.textContent = "Copied";
+      copyText(copy.dataset.copy).then((ok) => {
+        flash(copy, ok ? "Copied" : "Press Ctrl+C");
+        if (!ok) selectFallback(copy);
+        const menu = copy.closest("details");
+        if (menu && ok) menu.open = false;
       });
-      const menu = copy.closest("details");
-      if (menu) menu.open = false;
       return;
     }
     // Fill the static IP field: <button data-fill-ip="10.0.0.5">
