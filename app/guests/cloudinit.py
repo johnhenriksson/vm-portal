@@ -28,17 +28,23 @@ class CloudInit:
         }
         if req.ip:
             iface = req.network_interface
-            # netplan matches a glob; other renderers (ifupdown, NetworkManager) only use the key as
-            # the interface name, so images for those give the exact name.
-            key, match = ("nic0", {"match": {"name": iface}}) if iface.endswith("*") else (iface, {})
+            if iface.endswith("*"):
+                # netplan (Ubuntu): cloud-init hands the config to netplan, which matches a glob.
+                key, extra = "nic0", {"match": {"name": iface}, "routes": [{"to": "default", "via": s.ip_gateway}]}
+            else:
+                # ifupdown (Debian), NetworkManager/sysconfig (RHEL family): cloud-init converts the
+                # config itself. Its converter rejects `to: default`, which leaves the VM with no
+                # network at all, and renders routes for ifupdown with `route` (net-tools, not
+                # installed). gateway4 becomes each renderer's native gateway setting. These
+                # renderers only use the key as the interface name, so images give the exact name.
+                key, extra = iface, {"gateway4": s.ip_gateway}
             md["network"] = {
                 "version": 2,
                 "ethernets": {
                     key: {
-                        **match,
                         "dhcp4": False,
                         "addresses": [f"{req.ip}/{s.ip_prefix}"],
-                        "routes": [{"to": "default", "via": s.ip_gateway}],
+                        **extra,
                         "nameservers": {"addresses": s.ip_dns or [s.ip_gateway]},
                     }
                 },

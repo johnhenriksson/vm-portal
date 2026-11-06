@@ -102,3 +102,5 @@ def test_metadata_static_with_exact_interface_name():
     eth = md["network"]["ethernets"]
     assert list(eth) == ["eth0"] and "match" not in eth["eth0"]
     assert eth["eth0"]["addresses"] == ["10.0.0.20/24"]
+    # cloud-init's own converter (used for these renderers) fails on `to: default`: no network at all.
+    assert eth["eth0"]["gateway4"] == "10.0.0.1" and "routes" not in eth["eth0"]
