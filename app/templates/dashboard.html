@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "_template_age.html" import age %}
 {% from "_icons.html" import os_icon %}
+{% from "_links.html" import link %}
 {% block title %}Virtual machines · VM Portal{% endblock %}
 {% block content %}
 <div class="page-head">
@@ -28,7 +29,7 @@
         <tr>
           <td {% if loop.first %}style="border-top:0"{% endif %}>
             <div class="name-cell">{{ os_icon(g.image.manifest.os.distro if g.image else "") }}
-              <div><span class="title plain">{{ g.image.manifest.name if g.image else "Other templates" }}</span>
+              <div>{{ link(links.image(g.image.id if g.image else None), g.image.manifest.name if g.image else "Other templates", "title") }}
                    <span class="meta">{{ t.name }}{% if g.templates | length > 1 %} · {{ g.templates | length }} versions{% endif %}</span></div></div>
           </td>
           <td {% if loop.first %}style="border-top:0"{% endif %}>{{ age(t, settings.template_max_age_days) }}</td>

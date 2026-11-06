@@ -275,6 +275,7 @@ details.menu[open] > summary::after { transform: translateY(2px) rotate(-135deg)
 dl.props { display: grid; grid-template-columns: 9rem 1fr; gap: .75rem 1rem; margin: 0; }
 dl.props dt { color: var(--muted); }
 dl.props dd { margin: 0; color: var(--navy); }
+dl.props dd.notes { white-space: pre-line; overflow-wrap: anywhere; }
 
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2rem; }
 .stat { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }

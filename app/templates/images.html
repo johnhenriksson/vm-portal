@@ -2,6 +2,7 @@
 {% from "_template_age.html" import age %}
 {% from "_icons.html" import os_icon %}
 {% from "_status.html" import badge %}
+{% from "_links.html" import link %}
 {% block title %}Images · VM Portal{% endblock %}
 {% block content %}
 <div class="page-head">
@@ -101,7 +102,7 @@
 {% else %}
   {% for g in groups %}
   <div class="section" style="margin-top:{{ '0' if loop.first else '2rem' }}">
-    <div class="section-head"><h2>{{ g.image.manifest.name if g.image else "Other templates" }}</h2>
+    <div class="section-head"><h2>{{ link(links.image(g.image.id if g.image else None), g.image.manifest.name if g.image else "Other templates") }}</h2>
       {% if g.image %}<a href="/images/defs/{{ g.image.id }}">Image settings</a>{% endif %}</div>
     <div class="table-wrap">
     <table>
@@ -110,7 +111,7 @@
       {% for t in g.templates %}
         <tr>
           <td><div class="name-cell">{{ os_icon(g.image.manifest.os.distro if g.image else "") }}
-            <span class="title plain">{{ t.name }}</span></div></td>
+            {{ link(links.image(g.image.id if g.image else None), t.name, "title") }}</div></td>
           <td>{{ t.created.strftime("%Y-%m-%d %H:%M") if t.created else "–" }}</td>
           <td>{{ age(t, settings.template_max_age_days) }}</td>
           <td>{% if loop.first %}<span class="badge default plain">Default</span>{% else %}<span class="muted">Older version</span>{% endif %}</td>

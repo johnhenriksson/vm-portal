@@ -39,7 +39,8 @@ and Packer. Treat it like infrastructure tooling:
 - Secrets encrypted at rest (Fernet) and never sent back to the browser;
   changing the vCenter server requires re-entering its password.
 - Child processes (OpenTofu, Packer) get a minimal environment, never the
-  portal's own secrets.
+  portal's own secrets. Saved OpenTofu plans (they contain the vCenter
+  password) are created 0600 and deleted as soon as the resize job ends.
 - Browser console: ESXi certificate pinned to the thumbprint from vCenter;
   Origin, session and ownership checked; session limits.
 - VMs: SSH key-only; optional console password stored only as a bcrypt hash;

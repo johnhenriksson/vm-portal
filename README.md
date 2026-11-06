@@ -7,8 +7,9 @@ same web interface. Runs as a single container.
 - **Create VMs**: pick an image and version, size with sliders, DHCP or a static
   IP from a pool (with a free-IP finder), SSH keys, an optional console password
   and an optional `compose.yaml` that starts on first boot
-- **Manage VMs**: power on/off/reboot, destroy, SSH command, and a **browser
-  console** (noVNC) that works without access to the ESXi hosts
+- **Manage VMs**: power on/off/reboot, **resize** (vCPUs, memory, grow the
+  disk), notes, change owner, destroy, SSH command, and a **browser console**
+  (noVNC) that works without access to the ESXi hosts
 - **Images**: a catalog of image definitions (Packer templates): Ubuntu 26.04
   + Docker, Debian 13 + Docker and Rocky Linux 10 are built in. Configure each
   one's installer ISO, sizes and parameters; build with a live log; old
@@ -31,8 +32,12 @@ browser ──► FastAPI + htmx ──► jobs (in-process; logs in /data/jobs)
 ```
 
 - **Provisioning** clones a template with the module in `terraform/vm` (run by
-  OpenTofu). Each VM gets its own directory with a snapshot of the module and
-  its own state, so destroying a VM always uses the code that created it.
+  OpenTofu). Each VM gets its own directory with a copy of the module and its
+  own state. Before a resize or destroy the copy is refreshed and the
+  template's details are taken from the state, so pruned templates don't
+  matter. A resize applies only if OpenTofu's plan changes nothing but vCPUs,
+  memory and disk size (a change made by hand in vCenter stops it instead of
+  being undone).
 - **Guest setup** is done by a *guest driver* chosen by the image: `cloud-init`
   (via VMware guestinfo) for Linux. The interface in `app/guests/` is ready for
   others, such as Windows.

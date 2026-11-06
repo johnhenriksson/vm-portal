@@ -46,6 +46,18 @@ variable "name" {
   type = string
 }
 
+variable "template_facts" {
+  description = "Set by the portal after creation, so later plans don't need the (possibly deleted) template"
+  type = object({
+    guest_id     = string
+    scsi_type    = string
+    firmware     = string
+    adapter_type = string
+    uuid         = string
+  })
+  default = null
+}
+
 variable "cpus" {
   type    = number
   default = 2

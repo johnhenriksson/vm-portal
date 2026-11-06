@@ -13,6 +13,7 @@ from . import crypto, db, guests, images, ipam, jobs, provision, users, vsphere
 from .auth import (LoginRequired, client_ip, csrf_field, csrf_protect, current_user, require_admin,
                    require_user, start_session)
 from .config import APP_DIR, PublicSettings, get_bootstrap, get_settings, vcenter_configured
+from .links import Links
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("vm-portal")
@@ -97,7 +98,8 @@ async def _http_error(request: Request, exc: StarletteHTTPException):
 
 def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
     s = get_settings()
-    base = {"settings": PublicSettings(s), "current_user": current_user(request),
+    user = current_user(request)
+    base = {"settings": PublicSettings(s), "current_user": user, "links": Links(user),
             "vcenter_ready": vcenter_configured(s), "editing_enabled": s.allow_image_editing}
     return templates.TemplateResponse(request, name, {**base, **ctx}, status_code=status_code)
 
@@ -343,7 +345,10 @@ async def vm_detail(request: Request, name: str, user: dict = Depends(require_us
                        " ORDER BY id DESC LIMIT 20", (name, vm["created_at"]))
     owner = users.get(vm["owner_id"]) if vm["owner_id"] else None
     return render(request, "vm_detail.html", vm=vm, info=info, jobs=vm_jobs, error=err,
-                  owner=owner["username"] if owner else None, busy=jobs.is_locked(f"vm:{name}"))
+                  owner=owner["username"] if owner else None, busy=jobs.is_locked(f"vm:{name}"),
+                  all_users=[{"id": u["id"], "username": u["username"]} for u in users.all_users()]
+                  if is_admin(user) else [],
+                  can_resize=(get_settings().vms_dir / name / "terraform.tfstate").exists())
 
 
 @app.post("/vms/{name}/power/{action}")
@@ -356,6 +361,65 @@ async def vm_power(request: Request, name: str, action: str, user: dict = Depend
         raise HTTPException(502, err)
     db.audit(f"vm.power.{action}", name, username=user["username"], ip=client_ip(request))
     return RedirectResponse(f"/vms/{name}", status_code=303)
+
+
+@app.post("/vms/{name}/resize")
+async def vm_resize(
+    request: Request,
+    name: str,
+    user: dict = Depends(require_user),
+    cpus: int = Form(..., ge=1, le=32),
+    memory_mb: int = Form(..., ge=512, le=262144),
+    disk_gb: int = Form(..., ge=10, le=4096),
+    restart: str = Form(""),
+):
+    vm = _vm_or_404(name, user)
+    if vm["status"] != "ready":
+        raise HTTPException(409, "Only a ready VM can be resized")
+    if jobs.is_locked(f"vm:{name}"):
+        raise HTTPException(409, "A job is already running for this VM")
+    if memory_mb % 4:
+        raise HTTPException(400, "Memory must be a multiple of 4 MB")
+    if (cpus, memory_mb, disk_gb) == (vm["cpus"], vm["memory_mb"], vm["disk_gb"]):
+        return RedirectResponse(f"/vms/{name}", status_code=303)
+    needs_off = (cpus, memory_mb) != (vm["cpus"], vm["memory_mb"])
+    if needs_off and restart != "on":
+        live, err = await vcenter(vsphere.vms_by_name, True)
+        info = (live or {}).get(name)
+        if err or not info or info.power_state != "poweredOff":
+            raise HTTPException(400, "Changing vCPUs or memory restarts the VM: tick 'Restart the VM'")
+    try:
+        job_id = provision.resize(vm, cpus, memory_mb, disk_gb, restart=restart == "on", user_id=user["id"])
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    db.audit("vm.resize", f"{name}: {vm['cpus']}->{cpus} vCPU, {vm['memory_mb']}->{memory_mb} MB,"
+             f" {vm['disk_gb']}->{disk_gb} GB", username=user["username"], ip=client_ip(request))
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.post("/vms/{name}/details")
+async def vm_details(request: Request, name: str, user: dict = Depends(require_user),
+                     notes: str = Form("", max_length=2000), owner_id: str = Form("")):
+    """Portal-only details: notes (owner or admin), owner (admin). Nothing changes in vCenter."""
+    vm = _vm_or_404(name, user)
+    notes = notes.replace("\r\n", "\n").strip()
+    if any(ord(c) < 32 and c not in "\n\t" for c in notes):
+        raise HTTPException(400, "Notes can't contain control characters")
+    new_owner = vm["owner_id"]
+    if owner_id and is_admin(user):
+        target = users.get(int(owner_id)) if owner_id.isdigit() else None
+        if target is None:
+            raise HTTPException(400, "Unknown user")
+        new_owner = target["id"]
+    db.execute("UPDATE vms SET notes=?, owner_id=? WHERE id=?", (notes, new_owner, vm["id"]))
+    if new_owner != vm["owner_id"]:
+        old = users.get(vm["owner_id"]) if vm["owner_id"] else None
+        db.audit("vm.owner_changed", f"{name}: {old['username'] if old else '-'} -> {target['username']}",
+                 username=user["username"], ip=client_ip(request))
+    if notes != (vm["notes"] or ""):
+        db.audit("vm.notes_changed", name, username=user["username"], ip=client_ip(request))
+    # The previous owner may no longer see the VM.
+    return RedirectResponse(f"/vms/{name}" if new_owner == user["id"] or is_admin(user) else "/", status_code=303)
 
 
 @app.post("/vms/{name}/destroy")

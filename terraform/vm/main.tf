@@ -38,9 +38,23 @@ data "vsphere_network" "this" {
   datacenter_id = data.vsphere_datacenter.this.id
 }
 
+# The template is only needed to create the VM. Later plans (resize, destroy) get its
+# facts from the VM's state through var.template_facts, because old templates are pruned.
 data "vsphere_virtual_machine" "template" {
+  count         = var.template_facts == null ? 1 : 0
   name          = var.template
   datacenter_id = data.vsphere_datacenter.this.id
+}
+
+locals {
+  template = var.template_facts != null ? merge(var.template_facts, { disk_size = 0 }) : {
+    guest_id     = data.vsphere_virtual_machine.template[0].guest_id
+    scsi_type    = data.vsphere_virtual_machine.template[0].scsi_type
+    firmware     = data.vsphere_virtual_machine.template[0].firmware
+    adapter_type = data.vsphere_virtual_machine.template[0].network_interface_types[0]
+    uuid         = data.vsphere_virtual_machine.template[0].id
+    disk_size    = data.vsphere_virtual_machine.template[0].disks[0].size
+  }
 }
 
 resource "vsphere_virtual_machine" "this" {
@@ -51,23 +65,23 @@ resource "vsphere_virtual_machine" "this" {
 
   num_cpus  = var.cpus
   memory    = var.memory_mb
-  guest_id  = data.vsphere_virtual_machine.template.guest_id
-  scsi_type = data.vsphere_virtual_machine.template.scsi_type
-  firmware  = data.vsphere_virtual_machine.template.firmware
+  guest_id  = local.template.guest_id
+  scsi_type = local.template.scsi_type
+  firmware  = local.template.firmware
 
   network_interface {
     network_id   = data.vsphere_network.this.id
-    adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
+    adapter_type = local.template.adapter_type
   }
 
   disk {
     label            = "disk0"
-    size             = max(var.disk_gb, data.vsphere_virtual_machine.template.disks[0].size)
+    size             = max(var.disk_gb, local.template.disk_size)
     thin_provisioned = true
   }
 
   clone {
-    template_uuid = data.vsphere_virtual_machine.template.id
+    template_uuid = local.template.uuid
   }
 
   extra_config = {

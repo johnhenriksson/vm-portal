@@ -75,6 +75,7 @@ MIGRATIONS = [
     ("vms", "console_login", "INTEGER NOT NULL DEFAULT 0"),
     ("vms", "vm_user", "TEXT"),
     ("vms", "image_id", "TEXT"),
+    ("vms", "notes", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 _lock = threading.Lock()

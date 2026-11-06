@@ -1,0 +1,4 @@
+{# Link text to href when there is one (the user may open it), else plain text. #}
+{% macro link(href, text, cls="") -%}
+{% if href %}<a href="{{ href }}"{% if cls %} class="{{ cls }}"{% endif %}>{{ text }}</a>{% else %}<span{% if cls %} class="{{ cls }} plain"{% endif %}>{{ text }}</span>{% endif %}
+{%- endmacro %}

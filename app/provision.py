@@ -1,4 +1,4 @@
-"""Create and destroy VMs with Terraform; one working directory + state per VM."""
+"""Create, resize and destroy VMs with OpenTofu; one working directory + state per VM."""
 import asyncio
 import json
 import os
@@ -175,12 +175,7 @@ def destroy(vm: dict, user_id: int | None = None) -> int:
             log.step("No Terraform state; nothing to destroy in vCenter")
         else:
             log.step(f"Destroying {vm['name']}")
-            # Re-init first: the directory may come from an older image (or from Terraform).
-            await log.run([TOFU, "init", "-no-color", "-input=false", "-upgrade"], cwd=d, env=tf_env())
-            if TOFU.endswith("tofu") and LEGACY_PROVIDER in (d / "terraform.tfstate").read_text():
-                log.step("Moving Terraform-era state to the OpenTofu provider address (backup kept)")
-                await log.run([TOFU, "state", "replace-provider", "-no-color", "-auto-approve",
-                               LEGACY_PROVIDER, TOFU_PROVIDER], cwd=d, env=tf_env())
+            await prepare_workspace(d, log)
             await log.run([TOFU, "destroy", "-no-color", "-input=false", "-auto-approve"], cwd=d, env=tf_env())
         archive = get_settings().data_dir / "destroyed" / f"{vm['name']}-{vm['id']}"
         if d.exists():
@@ -196,6 +191,186 @@ def destroy(vm: dict, user_id: int | None = None) -> int:
     )
     db.execute("UPDATE vms SET last_job_id=? WHERE id=?", (job_id, vm["id"]))
     return job_id
+
+
+# --- existing VMs ---------------------------------------------------------------------
+
+async def prepare_workspace(d: Path, log: jobs.JobLog) -> None:
+    """Bring an existing VM's working directory up to date before planning against it.
+
+    The directory may come from an older portal (older module copy, Terraform instead of
+    OpenTofu), and the VM's template may have been pruned since it was cloned.
+    """
+    module = get_settings().terraform_module_dir
+    for f in module.glob("*.tf"):
+        shutil.copyfile(f, d / f.name)
+    await log.run([TOFU, "init", "-no-color", "-input=false", "-upgrade"], cwd=d, env=tf_env())
+    if TOFU.endswith("tofu") and LEGACY_PROVIDER in (d / "terraform.tfstate").read_text():
+        log.step("Moving Terraform-era state to the OpenTofu provider address (backup kept)")
+        await log.run([TOFU, "state", "replace-provider", "-no-color", "-auto-approve",
+                       LEGACY_PROVIDER, TOFU_PROVIDER], cwd=d, env=tf_env())
+    facts = template_facts(await _show_json(d))
+    if facts:
+        update_tfvars(d, template_facts=facts)
+    else:
+        log.write("Template facts not found in state; planning against the template itself\n")
+
+
+def _vm_resource(show: dict) -> dict | None:
+    """The VM's attributes from `tofu show -json` of the state."""
+    for r in (show.get("values") or {}).get("root_module", {}).get("resources", []):
+        if r.get("address") == "vsphere_virtual_machine.this":
+            return r.get("values") or {}
+    return None
+
+
+def template_facts(show: dict) -> dict | None:
+    vm = _vm_resource(show)
+    try:
+        return {"guest_id": vm["guest_id"], "scsi_type": vm["scsi_type"], "firmware": vm["firmware"],
+                "adapter_type": vm["network_interface"][0]["adapter_type"],
+                "uuid": vm["clone"][0]["template_uuid"]}
+    except (TypeError, KeyError, IndexError):
+        return None
+
+
+def actual_size(show: dict) -> dict | None:
+    vm = _vm_resource(show)
+    try:
+        return {"cpus": int(vm["num_cpus"]), "memory_mb": int(vm["memory"]), "disk_gb": int(vm["disk"][0]["size"])}
+    except (TypeError, KeyError, IndexError, ValueError):
+        return None
+
+
+def update_tfvars(d: Path, **values) -> None:
+    """Change some variables, keeping the rest (first-boot data, password hash) as created."""
+    path = d / "terraform.tfvars.json"
+    data = json.loads(path.read_text())
+    data.update(values)
+    tmp = path.with_suffix(".tmp")
+    tmp.unlink(missing_ok=True)
+    tmp.touch(mode=0o600)
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)
+
+
+# Attributes a resize may change. Anything else in the plan (a manual change in vCenter
+# that the plan would revert, a replacement) stops the job before it touches the VM.
+RESIZABLE = {("num_cpus",), ("memory",), ("disk", 0, "size")}
+# Attributes the provider recomputes on any update; they may show as unknown.
+RECOMPUTED = {"change_version", "reboot_required", "imported", "default_ip_address", "guest_ip_addresses",
+              "vmx_path", "moid", "power_state", "uuid", "vapp_transport"}
+# Attributes that may go from unset in older state to the provider's default.
+DEFAULTED = {"swap_placement_policy": "inherit"}
+
+
+def _diff(before, after, unknown, path=()):
+    """Paths where after differs from before (or is unknown until apply)."""
+    if unknown is True:
+        yield path
+        return
+    if isinstance(before, dict) and isinstance(after, dict):
+        unknown = unknown if isinstance(unknown, dict) else {}
+        for k in before.keys() | after.keys() | unknown.keys():
+            yield from _diff(before.get(k), after.get(k), unknown.get(k), (*path, k))
+    elif isinstance(before, list) and isinstance(after, list) and len(before) == len(after):
+        unknown = unknown if isinstance(unknown, list) else []
+        for i, (b, a) in enumerate(zip(before, after)):
+            yield from _diff(b, a, unknown[i] if i < len(unknown) else None, (*path, i))
+    elif before != after:
+        yield path
+
+
+def check_resize_plan(plan: dict) -> list[str]:
+    """Problems that make a plan more than an in-place resize of this VM (empty = safe)."""
+    problems = []
+    for rc in plan.get("resource_changes", []):
+        actions = rc.get("change", {}).get("actions", [])
+        if actions in (["no-op"], ["read"]):
+            continue
+        if rc.get("address") != "vsphere_virtual_machine.this" or actions != ["update"]:
+            problems.append(f"{rc.get('address')}: {'/'.join(actions)}")
+            continue
+        ch = rc["change"]
+        before, after = ch.get("before") or {}, ch.get("after") or {}
+        for path in _diff(before, after, ch.get("after_unknown")):
+            if path in RESIZABLE or (len(path) == 1 and path[0] in RECOMPUTED):
+                continue
+            if len(path) == 1 and not before.get(path[0]) and DEFAULTED.get(path[0]) == after.get(path[0]):
+                continue
+            problems.append("would change " + ".".join(map(str, path)))
+    return problems
+
+
+def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, user_id: int | None = None) -> int:
+    """Change a VM's vCPUs, memory and disk size. Returns the job id.
+
+    CPU and memory changes need the VM off; with restart=True the provider shuts the guest
+    down cleanly, changes it and powers it back on. A bigger disk is added online.
+    """
+    d = vm_dir(vm["name"])
+    if not (d / "terraform.tfstate").exists():
+        raise ValueError("This VM has no Terraform state, so the portal can't change it")
+    if disk_gb < vm["disk_gb"]:
+        raise ValueError("Disks can only grow")
+    needs_off = (cpus, memory_mb) != (vm["cpus"], vm["memory_mb"])
+    target = {"cpus": cpus, "memory_mb": memory_mb, "disk_gb": disk_gb}
+
+    async def run(job_id: int, log: jobs.JobLog) -> None:
+        from . import vsphere
+        changes = ", ".join(f"{k} {vm[k]} -> {v}" for k, v in target.items() if vm[k] != v)
+        log.step(f"Resizing {vm['name']}: {changes}")
+        if needs_off and not restart:
+            info = (await asyncio.to_thread(vsphere.vms_by_name, True)).get(vm["name"])
+            if info is None or info.power_state != "poweredOff":
+                raise jobs.JobFailed("Changing vCPUs or memory restarts the VM, and no restart was allowed")
+        await prepare_workspace(d, log)
+        before = actual_size(await _show_json(d))
+        if before and disk_gb < before["disk_gb"]:
+            # The clone can be bigger than asked for when the template's disk was bigger.
+            raise jobs.JobFailed(f"The disk is already {before['disk_gb']} GB and disks can only grow")
+        plan = d / "resize.tfplan"
+        try:
+            update_tfvars(d, **target)
+            log.step("Planning")
+            # The plan file holds variable values, including the vCenter password: keep it private
+            # and delete it whatever happens.
+            plan.unlink(missing_ok=True)
+            plan.touch(mode=0o600)
+            await log.run([TOFU, "plan", "-no-color", "-input=false", f"-out={plan.name}"], cwd=d, env=tf_env(),
+                          umask=0o077)
+            problems = check_resize_plan(await _show_json(d, plan.name))
+            if problems:
+                raise jobs.JobFailed("The plan does more than resize the VM, so nothing was changed. This usually"
+                                     " means the VM was changed in vCenter by hand:\n  " + "\n  ".join(problems))
+            log.step("Applying" + (" (the VM shuts down and starts again)" if needs_off else ""))
+            await log.run([TOFU, "apply", "-no-color", "-input=false", plan.name], cwd=d, env=tf_env())
+        finally:
+            plan.unlink(missing_ok=True)
+            # Record what the VM really has now, whether or not the apply got through.
+            actual = actual_size(await _show_json(d))
+            if actual:
+                update_tfvars(d, **actual)
+                db.execute("UPDATE vms SET cpus=?, memory_mb=?, disk_gb=? WHERE id=?",
+                           (actual["cpus"], actual["memory_mb"], actual["disk_gb"], vm["id"]))
+        if disk_gb > vm["disk_gb"]:
+            log.write("The root filesystem grows into the new space on the next boot.\n")
+
+    job_id = jobs.submit("vm-resize", vm["name"], run, lock_key=f"vm:{vm['name']}", user_id=user_id)
+    db.execute("UPDATE vms SET last_job_id=? WHERE id=?", (job_id, vm["id"]))
+    return job_id
+
+
+async def _show_json(d: Path, plan: str | None = None) -> dict:
+    proc = await asyncio.create_subprocess_exec(
+        TOFU, "show", "-json", *([plan] if plan else []), cwd=d, env=jobs.child_env(tf_env()),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    try:
+        return json.loads(out or b"{}")
+    except json.JSONDecodeError:
+        return {}
 
 
 async def _output(d: Path) -> dict:

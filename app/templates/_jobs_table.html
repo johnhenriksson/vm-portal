@@ -1,5 +1,6 @@
 {% from "_status.html" import badge %}
-{% set kind_labels = {"vm-create": "Create VM", "vm-destroy": "Destroy VM", "packer-build": "Template build"} %}
+{% from "_links.html" import link %}
+{% set kind_labels = {"vm-create": "Create VM", "vm-destroy": "Destroy VM", "vm-resize": "Resize VM", "packer-build": "Template build"} %}
 <div class="table-wrap">
 <table>
   <thead><tr><th>Job</th><th>Target</th><th>Status</th><th>Started</th><th>Finished</th><th></th></tr></thead>
@@ -7,7 +8,7 @@
   {% for j in jobs %}
     <tr>
       <td><a href="/jobs/{{ j.id }}"><strong>#{{ j.id }}</strong></a> <span class="muted">{{ kind_labels.get(j.kind, j.kind) }}</span></td>
-      <td>{{ j.target }}</td>
+      <td>{{ link(links.job_target(j), j.target) }}</td>
       <td>{{ badge(j.status) }}</td>
       <td class="muted">{{ (j.started_at or j.created_at)[:16] | replace("T", " ") }}</td>
       <td class="muted">{{ (j.finished_at or "")[:16] | replace("T", " ") }}</td>

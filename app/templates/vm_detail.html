@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "_status.html" import badge, power %}
 {% from "_icons.html" import ubuntu %}
+{% from "_links.html" import link %}
 {% block title %}{{ vm.name }} · VM Portal{% endblock %}
 {% block content %}
 {% set ip = (info.ip if info else None) or vm.ip %}
@@ -8,7 +9,7 @@
 <div class="page-head">
   <div class="name-cell">{{ ubuntu("os-icon") }}
     <div><h1 style="margin:0">{{ vm.name }}</h1>
-      <p class="sub" style="margin:0">{{ vm.cpus }} vCPU / {{ (vm.memory_mb / 1024) | round(1) | replace(".0", "") }} GB / {{ vm.disk_gb }} GB disk · {{ vm.template }}</p></div>
+      <p class="sub" style="margin:0">{{ vm.cpus }} vCPU / {{ (vm.memory_mb / 1024) | round(1) | replace(".0", "") }} GB / {{ vm.disk_gb }} GB disk · {{ link(links.template(vm.template, vm.image_id), vm.template) }}</p></div>
   </div>
   <div class="actions">
     {{ badge(vm.status) }}
@@ -44,9 +45,10 @@
         <dt>Power</dt><dd>{% if info %}{{ power(info.power_state) }}{% else %}<span class="error">Not found in vCenter</span>{% endif %}</dd>
         <dt>IP address</dt><dd>{% if ip %}<span class="mono">{{ ip }}</span> <span class="muted">({{ "static" if vm.ip_mode == "static" else "DHCP" }})</span>{% else %}–{% endif %}</dd>
         <dt>Created</dt><dd>{{ vm.created_at[:16] | replace("T", " ") }}</dd>
-        <dt>Template</dt><dd>{{ vm.template }}</dd>
+        <dt>Template</dt><dd>{{ link(links.template(vm.template, vm.image_id), vm.template) }}</dd>
         {% if current_user.role == "admin" %}<dt>Owner</dt><dd>{{ owner or "–" }}</dd>{% endif %}
         <dt>Compose app</dt><dd>{{ "Yes, /opt/app/compose.yaml" if vm.has_compose else "No" }}</dd>
+        {% if vm.notes %}<dt>Notes</dt><dd class="notes">{{ vm.notes }}</dd>{% endif %}
       </dl>
     </div>
   </div>
@@ -72,6 +74,58 @@
     </div>
   </div>
 </div>
+
+{% if vm.status == "ready" and not busy %}
+<div class="grid-2 section">
+  <div class="card" id="resize">
+    <div class="card-head">Resize</div>
+    <div class="card-body">
+      {% if can_resize %}
+      <form method="post" action="/vms/{{ vm.name }}/resize">
+        {{ csrf_field(request) }}
+        <div class="grid-3">
+          <label class="field"><span class="label">vCPUs</span>
+            <input type="number" name="cpus" min="1" max="32" value="{{ vm.cpus }}" required></label>
+          <label class="field"><span class="label">Memory (MB)</span>
+            <input type="number" name="memory_mb" min="512" max="262144" step="4" value="{{ vm.memory_mb }}" required></label>
+          <label class="field"><span class="label">Disk (GB)</span>
+            <input type="number" name="disk_gb" min="{{ vm.disk_gb }}" max="4096" value="{{ vm.disk_gb }}" required></label>
+        </div>
+        <label class="check-field"><input type="checkbox" name="restart">
+          <span><span class="label">Restart the VM</span>
+            <span class="hint">Needed to change vCPUs or memory while the VM is on: it shuts down cleanly
+              (forced off after 3 minutes if the guest doesn't respond), changes and starts again.
+              A bigger disk is added without a restart; the filesystem grows into it on the next boot.
+              Disks can't shrink.</span></span></label>
+        <button>Resize</button>
+      </form>
+      {% else %}
+      <p class="muted" style="margin:0">This VM has no Terraform state in the portal, so it can't be resized here.</p>
+      {% endif %}
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head">Details</div>
+    <div class="card-body">
+      <form method="post" action="/vms/{{ vm.name }}/details">
+        {{ csrf_field(request) }}
+        <label class="field"><span class="label">Notes</span>
+          <textarea name="notes" rows="3" maxlength="2000" placeholder="What runs here, who to ask…">{{ vm.notes or "" }}</textarea>
+          <span class="hint">Only shown in the portal.</span></label>
+        {% if all_users %}
+        <label class="field"><span class="label">Owner</span>
+          <select name="owner_id">
+            {% for u in all_users %}<option value="{{ u.id }}" {% if u.id == vm.owner_id %}selected{% endif %}>{{ u.username }}</option>{% endfor %}
+            {% if not vm.owner_id %}<option value="" selected>–</option>{% endif %}
+          </select>
+          <span class="hint">The owner and admins can see and manage the VM.</span></label>
+        {% endif %}
+        <button class="btn-outline">Save</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 <div class="section">
   <div class="section-head"><h2>Jobs</h2></div>
