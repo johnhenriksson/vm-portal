@@ -1,0 +1,49 @@
+# Publish site/ (the project's landing page) to GitHub Pages.
+# One-time setup: repository Settings → Pages → Source: "GitHub Actions".
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write      # publish the site
+      id-token: write   # prove to Pages that this workflow is publishing
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fill in the repository's links
+        # The page links to github.com/OWNER/vm-portal and OWNER.github.io/vm-portal;
+        # point them at wherever this repository actually is.
+        env:
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          NAME: ${{ github.event.repository.name }}
+        run: |
+          mkdir -p _site
+          cp -r site/index.html site/site.css site/favicon.svg site/img _site/
+          owner_lc=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          sed -i -e "s#github.com/OWNER/vm-portal#github.com/${REPO}#g" \
+                 -e "s#OWNER.github.io/vm-portal/#${owner_lc}.github.io/${NAME}/#g" _site/index.html
+          ! grep -n "OWNER" _site/index.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

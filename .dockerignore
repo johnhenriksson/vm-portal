@@ -16,3 +16,5 @@ screenshot*.png
 **/packer.log
 **/crash.log
 **/packer_cache
+# The landing page and its screenshot tools are not part of the portal
+site

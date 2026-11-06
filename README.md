@@ -161,6 +161,11 @@ build/keys/     release signing keys the Dockerfile verifies tools with
 tests/          pytest suite
 ```
 
+## Website
+
+The landing page lives in `site/` and is published to GitHub Pages; see
+`site/README.md` for previewing it and regenerating the screenshots.
+
 ## License
 
 vm-portal is licensed under the [Apache License 2.0](LICENSE). Bundled and
