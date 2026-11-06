@@ -41,7 +41,7 @@ jobs:
           sed -i -e "s#github.com/OWNER/vm-portal#github.com/${REPO}#g" \
                  -e "s#OWNER.github.io/vm-portal/#${owner_lc}.github.io/${NAME}/#g" _site/index.html
           ! grep -n "OWNER" _site/index.html
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
