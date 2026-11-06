@@ -61,9 +61,8 @@ FAKE_TOFU = textwrap.dedent('''\
         sys.exit(0)
     elif args[0] == "plan":
         out = next(a for a in args if a.startswith("-out="))[5:]
-        pathlib.Path(out).unlink(missing_ok=True)  # like a tool that writes a new file
         pathlib.Path(out).write_text("plan with secrets")
-        pathlib.Path("plan-mode").write_text(oct(pathlib.Path(out).stat().st_mode & 0o777))
+        pathlib.Path("plan-dir-mode").write_text(oct(pathlib.Path(out).parent.stat().st_mode & 0o777))
     elif args[0] == "apply":
         if pathlib.Path("fail-apply").exists():
             sys.exit(1)
@@ -111,8 +110,8 @@ async def test_resize_job_updates_vm_and_keeps_first_boot_data(fake_vm):
     assert (tfvars["cpus"], tfvars["memory_mb"], tfvars["disk_gb"]) == (4, 8192, 60)
     row = db.active_vm("web01")
     assert (row["cpus"], row["memory_mb"], row["disk_gb"]) == (4, 8192, 60)
-    assert not (fake_vm / "resize.tfplan").exists()             # the plan file holds the password
-    assert (fake_vm / "plan-mode").read_text() == "0o600"       # and was private while it existed
+    assert not (fake_vm / ".plan").exists()                     # the plan file holds the password
+    assert (fake_vm / "plan-dir-mode").read_text() == "0o700"   # and was private while it existed
     assert (fake_vm / "main.tf").exists()                       # module copy refreshed
     assert "grows into the new space" in log
 
@@ -123,7 +122,7 @@ async def test_resize_stops_when_the_plan_does_more(fake_vm):
     assert status == "failed" and "would change annotation" in log and "ok apply" not in log
     assert db.active_vm("web01")["cpus"] == 2
     assert json.loads((fake_vm / "terraform.tfvars.json").read_text())["cpus"] == 2  # back to what's real
-    assert not (fake_vm / "resize.tfplan").exists()
+    assert not (fake_vm / ".plan").exists()
 
 
 async def test_failed_apply_records_the_real_size(fake_vm):

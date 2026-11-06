@@ -72,17 +72,13 @@ class JobLog:
     def step(self, text: str) -> None:
         self.write(f"\n==> {text}\n")
 
-    async def run(self, cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None,
-                  umask: int = -1) -> None:
-        """Run a command, stream output into the log, raise JobFailed on non-zero exit.
-
-        umask: e.g. 0o077 when the command writes files holding secrets.
-        """
+    async def run(self, cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
+        """Run a command, stream output into the log, raise JobFailed on non-zero exit."""
         self.write(f"$ {' '.join(cmd)}\n")
         full_env = child_env(env)
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=cwd, env=full_env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, umask=umask,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         assert proc.stdout
         async for line in proc.stdout:

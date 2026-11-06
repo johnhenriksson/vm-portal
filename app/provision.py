@@ -329,24 +329,25 @@ def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, use
         if before and disk_gb < before["disk_gb"]:
             # The clone can be bigger than asked for when the template's disk was bigger.
             raise jobs.JobFailed(f"The disk is already {before['disk_gb']} GB and disks can only grow")
-        plan = d / "resize.tfplan"
+        # The plan file holds variable values, including the vCenter password: it goes in a
+        # folder only the portal can open (whatever mode tofu gives the file) and is deleted
+        # whatever happens. (No umask for the child: uvloop's subprocess API doesn't take one.)
+        private = d / ".plan"
+        shutil.rmtree(private, ignore_errors=True)
+        private.mkdir(mode=0o700)
+        plan = f"{private.name}/resize.tfplan"
         try:
             update_tfvars(d, **target)
             log.step("Planning")
-            # The plan file holds variable values, including the vCenter password: keep it private
-            # and delete it whatever happens.
-            plan.unlink(missing_ok=True)
-            plan.touch(mode=0o600)
-            await log.run([TOFU, "plan", "-no-color", "-input=false", f"-out={plan.name}"], cwd=d, env=tf_env(),
-                          umask=0o077)
-            problems = check_resize_plan(await _show_json(d, plan.name))
+            await log.run([TOFU, "plan", "-no-color", "-input=false", f"-out={plan}"], cwd=d, env=tf_env())
+            problems = check_resize_plan(await _show_json(d, plan))
             if problems:
                 raise jobs.JobFailed("The plan does more than resize the VM, so nothing was changed. This usually"
                                      " means the VM was changed in vCenter by hand:\n  " + "\n  ".join(problems))
             log.step("Applying" + (" (the VM shuts down and starts again)" if needs_off else ""))
-            await log.run([TOFU, "apply", "-no-color", "-input=false", plan.name], cwd=d, env=tf_env())
+            await log.run([TOFU, "apply", "-no-color", "-input=false", plan], cwd=d, env=tf_env())
         finally:
-            plan.unlink(missing_ok=True)
+            shutil.rmtree(private, ignore_errors=True)
             # Record what the VM really has now, whether or not the apply got through.
             actual = actual_size(await _show_json(d))
             if actual:

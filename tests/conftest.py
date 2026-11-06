@@ -1,6 +1,12 @@
+import asyncio
 import os
 
 import pytest
+import uvloop
+
+# Production runs on uvloop (uvicorn[standard]); test on it too. It differs from asyncio's
+# own loop in places (e.g. subprocess options), and a job broke on exactly that once.
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 os.environ.update({
     "ADMIN_PASSWORD": "test-password-123",
