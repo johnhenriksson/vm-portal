@@ -1,5 +1,5 @@
 {% from "_status.html" import badge, power %}
-{% from "_icons.html" import ubuntu %}
+{% from "_icons.html" import os_icon %}
 {% from "_links.html" import link %}
 <div id="vm-table" hx-get="/partials/vms" hx-trigger="every 10s" hx-swap="outerHTML">
   {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
@@ -10,7 +10,7 @@
     <tbody>
     {% for vm in vms %}
       <tr>
-        <td><div class="name-cell">{{ ubuntu() }}
+        <td><div class="name-cell">{{ os_icon(links.distro(vm.image_id, vm.template)) }}
           <div><a class="title" href="/vms/{{ vm.name }}">{{ vm.name }}</a>
                <span class="meta">{{ link(links.template(vm.template, vm.image_id), vm.template) }}{% if vm.owner %} · {{ vm.owner }}{% endif %}</span></div></div></td>
         <td>{{ badge(vm.status) }}{% if vm.busy and vm.status == "ready" %} <span class="muted" aria-busy="true"></span>{% endif %}</td>

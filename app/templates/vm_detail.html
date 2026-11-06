@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% from "_status.html" import badge, power %}
-{% from "_icons.html" import ubuntu %}
+{% from "_icons.html" import os_icon %}
 {% from "_links.html" import link %}
 {% block title %}{{ vm.name }} · VM Portal{% endblock %}
 {% block content %}
 {% set ip = (info.ip if info else None) or vm.ip %}
 <div class="crumbs"><a href="/">Virtual machines</a> / {{ vm.name }}</div>
 <div class="page-head">
-  <div class="name-cell">{{ ubuntu("os-icon") }}
+  <div class="name-cell">{{ os_icon(links.distro(vm.image_id, vm.template)) }}
     <div><h1 style="margin:0">{{ vm.name }}</h1>
       <p class="sub" style="margin:0">{{ vm.cpus }} vCPU / {{ (vm.memory_mb / 1024) | round(1) | replace(".0", "") }} GB / {{ vm.disk_gb }} GB disk · {{ link(links.template(vm.template, vm.image_id), vm.template) }}</p></div>
   </div>

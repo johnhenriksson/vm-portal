@@ -49,7 +49,7 @@
         {{ os_icon(c.distro) }}
         <span><span class="choice-title">{{ c.name }}</span>
           <span class="choice-meta" style="display:block">Login user <code>{{ c.login_user }}</code>
-            {%- if c.templates[0].age_days is not none %} · newest built {{ c.templates[0].age_days }} days ago{% endif %}</span></span>
+            {%- if c.templates[0].age_days is not none %} · newest built {{ c.templates[0].age_days }} day{{ "" if c.templates[0].age_days == 1 else "s" }} ago{% endif %}</span></span>
         <span class="push">
           <select class="version-select" aria-label="Template version for {{ c.name }}" {% if c.templates | length == 1 %}disabled{% endif %}>
             {% for t in c.templates %}

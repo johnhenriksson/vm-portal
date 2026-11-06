@@ -44,3 +44,18 @@ def test_no_links_to_pages_the_user_cant_open():
         # Users can't open image pages, so templates are plain text for them.
         assert "/images/defs/" not in c.get("/vms/app01").text
         assert "/images/defs/" not in c.get("/").text
+
+
+def test_vm_icons_follow_the_image():
+    with client() as c:
+        login(c)
+        admin = users.by_name("admin")
+        db.execute("INSERT INTO vms (name,status,template,cpus,memory_mb,disk_gb,ip_mode,created_at,owner_id,image_id)"
+                   " VALUES ('db-01','ready','debian-13-docker-20261101-0300',1,1024,10,'dhcp',?,?,'debian-13')",
+                   (db.now(), admin["id"]))
+        from app.links import Links
+        links = Links(admin)
+        assert links.distro("debian-13") == "debian"
+        assert links.distro(None, "ubuntu-2604-docker-20261101-0300") == "ubuntu"   # older rows: no image_id
+        assert links.distro(None, "something-else") == ""
+        assert "#a80030" in c.get("/vms/db-01").text   # Debian's colour, not the Ubuntu logo

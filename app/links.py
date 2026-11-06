@@ -22,6 +22,12 @@ class Links:
     def _vms(self) -> dict[str, dict]:
         return {vm["name"]: vm for vm in db.active_vms()}
 
+    def distro(self, image_id: str | None, template: str | None = None) -> str:
+        """The OS of a VM's image, for its icon (any user: it's only an icon)."""
+        img = next((i for i in self._catalog if i.id == image_id and i.usable), None) \
+            or (images.for_template(template, self._catalog) if template else None)
+        return img.manifest.os.distro if img else ""
+
     def image(self, image_id: str | None) -> str | None:
         """Image definition page (admins only: the images pages are admin pages)."""
         if not self.admin or not image_id or not any(i.id == image_id for i in self._catalog):
