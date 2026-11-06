@@ -6,5 +6,5 @@ itsdangerous>=2.2,<3
 pydantic-settings>=2.7,<3
 pyvmomi>=8.0.3,<10
 PyYAML>=6,<7
-cryptography>=44,<47
+cryptography>=50,<52  # 50.0.0 fixes PYSEC-2026-3552/3553/3554, GHSA-537c-gmf6-5ccf
 bcrypt>=4.2,<6
