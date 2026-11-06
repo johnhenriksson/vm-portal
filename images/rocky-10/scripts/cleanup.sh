@@ -5,6 +5,12 @@ set -euxo pipefail
 
 # SSH: key-only, never passwords. 01- sorts first, and sshd uses the first value it reads.
 echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/01-no-password.conf > /dev/null
+# Locale: use the VM's own. Don't accept the client's LANG/LC_* (macOS sends e.g.
+# LC_CTYPE=UTF-8, which isn't a Linux locale: warnings on every login). AcceptEnv
+# lines add up, so a drop-in can't undo them; comment them out where they are.
+sudo sed -i -E 's/^([[:space:]]*AcceptEnv[[:space:]].*)$/# \1  # vm-portal: VMs use their own locale/' \
+  /etc/ssh/sshd_config $(sudo find /etc/ssh/sshd_config.d -name '*.conf' 2>/dev/null)
+sudo sshd -t
 sudo passwd -l "$USER"
 
 # cloud-init: off during the build (kickstart %post), on for clones.
