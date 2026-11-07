@@ -22,15 +22,6 @@
 {% macro vcpu(n) %}{{ n }} vCPU{% endmacro %}
 {% macro disk(n) %}{{ n }}GB{% endmacro %}
 
-{% block banner %}
-<div class="stepbar" id="stepbar">
-  <a class="s active" href="#sec-image"><span class="n">1</span>Image</a><span class="line"></span>
-  <a class="s" href="#sec-size"><span class="n">2</span>Size</a><span class="line"></span>
-  <a class="s" href="#sec-network"><span class="n">3</span>Network & access</a><span class="line"></span>
-  <a class="s" href="#sec-finalize"><span class="n">4</span>Finalize</a>
-</div>
-{% endblock %}
-
 {% block content %}
 <div class="page-head"><div><h1>Create virtual machine</h1></div></div>
 

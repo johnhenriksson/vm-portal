@@ -171,13 +171,5 @@
     form.addEventListener("change", summary);
     document.body.addEventListener("htmx:afterSwap", summary);
     summary();
-
-    const links = [...document.querySelectorAll("#stepbar .s")];
-    const obs = new IntersectionObserver((entries) => {
-      entries.forEach((en) => {
-        if (en.isIntersecting) links.forEach((a) => a.classList.toggle("active", a.hash === "#" + en.target.id));
-      });
-    }, { rootMargin: "-20% 0px -70% 0px" });
-    form.querySelectorAll(".create-section").forEach((s) => obs.observe(s));
   }
 })();

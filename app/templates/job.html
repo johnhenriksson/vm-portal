@@ -13,7 +13,8 @@
   <div class="actions">
     <span id="job-status">{{ badge(job.status) }}</span>
     {% set target = links.job_target(job) %}
-    {% if target %}<a href="{{ target }}" class="btn btn-outline">{{ "Go to VM" if job.kind.startswith("vm-") else "Go to image" }}</a>{% endif %}
+    {% if job.kind == "vm-destroy" %}<a href="/" class="btn btn-outline">Go to VM list</a>
+    {% elif target %}<a href="{{ target }}" class="btn btn-outline">{{ "Go to VM" if job.kind.startswith("vm-") else "Go to image" }}</a>{% endif %}
   </div>
 </div>
 <div class="log-head"><span>Output</span><label class="row" style="gap:.4rem"><input type="checkbox" id="follow" checked> Follow</label></div>

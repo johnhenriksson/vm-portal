@@ -59,3 +59,14 @@ def test_vm_icons_follow_the_image():
         assert links.distro(None, "ubuntu-2604-docker-20261101-0300") == "ubuntu"   # older rows: no image_id
         assert links.distro(None, "something-else") == ""
         assert "#a80030" in c.get("/vms/db-01").text   # Debian's colour, not the Ubuntu logo
+
+
+def test_destroy_job_links_to_the_vm_list():
+    with client() as c:
+        login(c)
+        admin = users.by_name("admin")
+        _vm("gone01", admin["id"], status="destroyed")
+        job = db.create_job("vm-destroy", "gone01", admin["id"])
+        page = c.get(f"/jobs/{job}").text
+        assert "Go to VM list" in page
+        assert 'href="/vms/gone01"' not in page
