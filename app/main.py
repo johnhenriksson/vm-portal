@@ -10,8 +10,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import crypto, db, guests, images, ipam, jobs, provision, users, vsphere
-from .auth import (LoginRequired, client_ip, csrf_field, csrf_protect, current_user, require_admin,
-                   require_user, start_session)
+from .auth import (SESSION_MAX_AGE, LoginRequired, client_ip, csrf_field, csrf_protect, current_user,
+                   end_session, require_admin, require_user, start_session)
 from .config import APP_DIR, PublicSettings, get_bootstrap, get_settings, vcenter_configured
 from .links import Links
 
@@ -49,7 +49,7 @@ app.add_middleware(
     secret_key=boot.secret_key or crypto.session_key(),
     session_cookie="vmportal_session",
     same_site="strict",
-    max_age=60 * 60 * 12,
+    max_age=SESSION_MAX_AGE,
 )
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=APP_DIR / "templates")
@@ -144,20 +144,18 @@ async def login_form(request: Request):
 @app.post("/login")
 async def login(request: Request, username: str = Form(""), password: str = Form("")):
     ip, uname = client_ip(request), username.strip().lower()[:64]
-    wait = max(users.ip_throttle.retry_after(ip), users.user_throttle.retry_after(uname))
+    wait = users.login_retry_after(uname, ip)
     if wait:
         db.audit("login.throttled", f"user {uname!r}", ip=ip)
         return render(request, "login.html", status_code=429, username=uname,
                       error=f"Too many failed attempts. Try again in {wait // 60 + 1} minutes.")
     user = await asyncio.to_thread(users.authenticate, uname, password)
     if user is None:
-        users.ip_throttle.fail(ip)
-        users.user_throttle.fail(uname)
+        users.login_failed(uname, ip)
         db.audit("login.failed", f"user {uname!r}", ip=ip)
         await login_failed_delay()
         return render(request, "login.html", status_code=401, username=uname, error="Wrong username or password")
-    users.ip_throttle.reset(ip)
-    users.user_throttle.reset(uname)
+    users.login_succeeded(uname, ip)
     start_session(request, user)
     db.audit("login", username=user["username"], ip=ip)
     return RedirectResponse("/", status_code=303)
@@ -169,7 +167,7 @@ async def login_failed_delay() -> None:
 
 @app.post("/logout")
 async def logout(request: Request):
-    request.session.clear()
+    end_session(request)
     return RedirectResponse("/login", status_code=303)
 
 
@@ -268,7 +266,7 @@ async def vm_create(
 ):
     form = dict(name=name, template=template, cpus=cpus, memory_mb=memory_mb, disk_gb=disk_gb,
                 ip_mode=ip_mode, ip=ip, ssh_keys=ssh_keys, compose_yaml=compose_yaml)
-    tmpls, _ = await vcenter(vsphere.templates)
+    tmpls, tmpls_err = await vcenter(vsphere.templates)
 
     async def fail(msg: str):
         return render(request, "vm_new.html", status_code=400, choices=image_choices(tmpls or []), form=form,
@@ -286,7 +284,11 @@ async def vm_create(
     except ValueError as e:
         return await fail(str(e))
 
-    if tmpls is not None and template not in {t.name for t in tmpls}:
+    # Fail closed: the template list is the only thing that keeps `template` to portal
+    # templates (Terraform would clone any VM by that name), so no list means no VM.
+    if tmpls is None:
+        return await fail(tmpls_err or "Could not list the templates in vCenter. Try again.")
+    if template not in {t.name for t in tmpls}:
         return await fail(f"Unknown template {template!r}")
     img = images.for_template(template)
     cfg = images.config(img) if img else None
@@ -356,7 +358,7 @@ async def vm_power(request: Request, name: str, action: str, user: dict = Depend
     if action not in ("on", "off", "shutdown", "reboot"):
         raise HTTPException(400, "Unknown action")
     _vm_or_404(name, user)
-    _, err = await vcenter(vsphere.power, name, action)
+    _, err = await vcenter(vsphere.power, name, action, provision.vm_moid(name))
     if err:
         raise HTTPException(502, err)
     db.audit(f"vm.power.{action}", name, username=user["username"], ip=client_ip(request))

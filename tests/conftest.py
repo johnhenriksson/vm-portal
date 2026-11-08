@@ -27,8 +27,7 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # don't pick up a developer's .env
     config.reset_caches()
     db._conn = None
-    users.ip_throttle.clear()
-    users.user_throttle.clear()
+    users.clear_throttles()
     users.setup_token = None
     yield tmp_path
     config.reset_caches()

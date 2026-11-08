@@ -190,10 +190,10 @@ def _wait(task, timeout: int = 300) -> None:
         raise RuntimeError(task.info.error.msg)
 
 
-def power(name: str, action: str) -> None:
+def power(name: str, action: str, moid: str | None = None) -> None:
     """action: on, off (hard), shutdown (guest), reboot (guest)."""
     with _lock:
-        vm = _find_locked(name)
+        vm = _find_vm_locked(name, moid)
         if action == "on":
             _wait(vm.PowerOnVM_Task())
         elif action == "off":
@@ -221,6 +221,27 @@ def _find_locked(name: str):
         if row.get("name") == name:
             return row["_obj"]
     raise LookupError(f"VM {name!r} not found in vCenter")
+
+
+def _find_vm_locked(name: str, moid: str | None):
+    """The portal's VM: by its managed object id when known, so another VM that has (or
+    later gets) the same name anywhere in vCenter is never the one acted on."""
+    if moid:
+        vm = vim.VirtualMachine(moid, _connect()._stub)
+        try:
+            ok = vm.name == name and not vm.config.template
+        except vmodl.fault.ManagedObjectNotFound:
+            ok = False
+        if not ok:
+            raise LookupError(f"VM {name!r} is no longer in vCenter")
+        return vm
+    # No id recorded (a VM from before Terraform state): only an unambiguous match.
+    matches = [r["_obj"] for r in _collect(["name", "config.template"])
+               if r.get("name") == name and not r.get("config.template")]
+    if len(matches) != 1:
+        raise LookupError(f"VM {name!r} not found in vCenter" if not matches else
+                          f"More than one VM in vCenter is named {name!r}; the portal won't guess which")
+    return matches[0]
 
 
 def _invalidate() -> None:
@@ -359,10 +380,10 @@ class ConsoleTicket:
     thumbprint: str    # ESXi certificate thumbprint as reported by vCenter
 
 
-def console_ticket(name: str) -> ConsoleTicket:
+def console_ticket(name: str, moid: str | None = None) -> ConsoleTicket:
     """A short-lived WebMKS (VNC over WebSocket) ticket for the VM's ESXi host."""
     with _lock:
-        vm = _find_locked(name)
+        vm = _find_vm_locked(name, moid)
         if vm.runtime.powerState != "poweredOn":
             raise RuntimeError("The VM is not powered on")
         t = vm.AcquireTicket("webmks")

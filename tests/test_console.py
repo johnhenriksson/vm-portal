@@ -70,7 +70,7 @@ def setup(monkeypatch, esxi):
     monkeypatch.setattr("app.console.vcenter_configured", lambda: True)
     ticket = vsphere.ConsoleTicket(host="127.0.0.1", port=esxi["port"], path="/ticket/secret-ticket",
                                    thumbprint=esxi["thumbprint"])
-    monkeypatch.setattr(vsphere, "console_ticket", lambda name: ticket)
+    monkeypatch.setattr(vsphere, "console_ticket", lambda name, moid=None: ticket)
     from app.main import app
     with TestClient(app) as c:
         users.create("alice", "purple-otter-41", "user")

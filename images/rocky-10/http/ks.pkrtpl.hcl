@@ -6,9 +6,11 @@ keyboard --xlayouts=${keyboard_layout}
 timezone UTC --utc
 network --bootproto=dhcp --device=link --activate --onboot=yes --hostname=rocky-packer
 
-# Packages from the mirrors, so any Rocky 10 ISO works and the template starts patched.
-url --mirrorlist="https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=BaseOS-10"
-repo --name=AppStream --mirrorlist="https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=AppStream-10"
+# Packages from Rocky's own HTTPS origin, so any Rocky 10 ISO works and the template
+# starts patched. Not the mirrorlist: it can hand out plain-HTTP third-party mirrors, and
+# the installer doesn't GPG-check packages, so TLS to the origin is what authenticates them.
+url --url="https://dl.rockylinux.org/pub/rocky/10/BaseOS/x86_64/os/"
+repo --name=AppStream --baseurl="https://dl.rockylinux.org/pub/rocky/10/AppStream/x86_64/os/"
 
 rootpw --lock
 user --name=${username} --groups=wheel --lock

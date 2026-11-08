@@ -12,6 +12,14 @@ locals {
   # Nobody needs this password (logins are key-only and cleanup.sh locks it):
   # a random one per build means no known hash ships in the repo or template.
   build_password_hash = bcrypt(uuidv4(), 12)
+  # Rendered once, so the file served and the checksum on the boot line always match.
+  preseed = templatefile("${path.root}/http/preseed.pkrtpl.hcl", {
+    authorized_keys_b64 = base64encode(join("\n", var.ssh_authorized_keys))
+    username            = var.ssh_username
+    password_hash       = local.build_password_hash
+    keyboard_layout     = var.keyboard_layout
+    locale              = var.locale
+  })
 }
 
 source "vsphere-iso" "debian" {
@@ -55,16 +63,13 @@ source "vsphere-iso" "debian" {
   iso_paths = [var.iso_url]
 
   # The Debian installer reads its answers over HTTP (it can't use a second CD).
-  # The file holds only the build key's public half and a random password hash.
+  # The file holds only the build key's public half and a random password hash, but its
+  # late_command runs as root: the boot line (typed over the vSphere console, a trusted
+  # channel) carries its MD5, and the installer refuses a file that doesn't match, so
+  # nobody on the build network can swap it.
   http_ip = var.http_ip
   http_content = {
-    "/preseed.cfg" = templatefile("${path.root}/http/preseed.pkrtpl.hcl", {
-      authorized_keys_b64 = base64encode(join("\n", var.ssh_authorized_keys))
-      username            = var.ssh_username
-      password_hash       = local.build_password_hash
-      keyboard_layout     = var.keyboard_layout
-      locale              = var.locale
-    })
+    "/preseed.cfg" = local.preseed
   }
 
   # UEFI GRUB menu: open its command line and boot the installer in auto mode.
@@ -72,7 +77,7 @@ source "vsphere-iso" "debian" {
   boot_command = [
     "c", "<wait3s>",
     "linux /install.amd/vmlinuz auto=true priority=critical ",
-    "url=http://{{ .HTTPIP }}:{{ .HTTPPort }}/preseed.cfg ",
+    "url=http://{{ .HTTPIP }}:{{ .HTTPPort }}/preseed.cfg preseed/url/checksum=${md5(local.preseed)} ",
     "netcfg/get_hostname=debian-packer netcfg/get_domain= ---", "<enter><wait3s>",
     "initrd /install.amd/initrd.gz", "<enter><wait3s>",
     "boot", "<enter>",

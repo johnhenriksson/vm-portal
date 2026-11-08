@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS image_settings (
     updated_at  TEXT NOT NULL,
     updated_by  TEXT
 );
+CREATE TABLE IF NOT EXISTS revoked_sessions (
+    sid         TEXT PRIMARY KEY,         -- session id from a logged-out cookie
+    expires_at  TEXT NOT NULL             -- after this the cookie itself has expired
+);
 CREATE TABLE IF NOT EXISTS audit (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       TEXT NOT NULL,
@@ -220,6 +224,22 @@ def create_user(username: str, password_hash: str, role: str, *, only_if_first: 
         )
         c.commit()
         return cur.lastrowid
+
+
+def revoke_session(sid: str, ttl_seconds: int) -> None:
+    """Remember a logged-out session id until every copy of its cookie has expired."""
+    from datetime import timedelta
+    ts = datetime.now(timezone.utc)
+    expires = (ts + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds")
+    with _lock:
+        c = conn()
+        c.execute("DELETE FROM revoked_sessions WHERE expires_at < ?", (ts.isoformat(timespec="seconds"),))
+        c.execute("INSERT OR REPLACE INTO revoked_sessions (sid, expires_at) VALUES (?, ?)", (sid, expires))
+        c.commit()
+
+
+def session_revoked(sid: str) -> bool:
+    return one("SELECT 1 FROM revoked_sessions WHERE sid=?", (sid,)) is not None
 
 
 def audit(action: str, detail: str = "", *, username: str | None = None, ip: str | None = None) -> None:

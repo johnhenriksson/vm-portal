@@ -68,6 +68,23 @@ def test_tfvars_has_no_password():
     assert "vc-secret" not in str(provision.tfvars(req()))
 
 
+def test_connection_settings_come_from_env_not_tfvars():
+    # tfvars.json overrides TF_VAR_*, so a value frozen there would outlive a settings change.
+    assert not set(provision.CONNECTION_VARS) & provision.tfvars(req()).keys()
+    env = provision.tf_env()
+    for k in provision.CONNECTION_VARS:
+        assert f"TF_VAR_{k}" in env
+    assert env["TF_VAR_vsphere_insecure"] in ("true", "false")
+
+
+def test_update_tfvars_can_drop_keys(tmp_path):
+    import json
+    (tmp_path / "terraform.tfvars.json").write_text(json.dumps(
+        {"vsphere_server": "old", "vsphere_insecure": True, "userdata": "keep"}))
+    provision.update_tfvars(tmp_path, _drop=provision.CONNECTION_VARS)
+    assert json.loads((tmp_path / "terraform.tfvars.json").read_text()) == {"userdata": "keep"}
+
+
 def test_console_password_hash_and_userdata():
     import bcrypt
     assert provision.hash_console_password("", "") is None
@@ -104,3 +121,41 @@ def test_metadata_static_with_exact_interface_name():
     assert eth["eth0"]["addresses"] == ["10.0.0.20/24"]
     # cloud-init's own converter (used for these renderers) fails on `to: default`: no network at all.
     assert eth["eth0"]["gateway4"] == "10.0.0.1" and "routes" not in eth["eth0"]
+
+
+def test_vm_moid_from_terraform_state(data_dir):
+    import json
+    d = data_dir / "vms" / "web01"
+    d.mkdir(parents=True)
+    assert provision.vm_moid("web01") is None
+    (d / "terraform.tfstate").write_text(json.dumps({"resources": [
+        {"mode": "data", "type": "vsphere_virtual_machine", "name": "template",
+         "instances": [{"attributes": {"moid": "vm-tmpl"}}]},
+        {"mode": "managed", "type": "vsphere_virtual_machine", "name": "this",
+         "instances": [{"attributes": {"moid": "vm-42"}}]}]}))
+    assert provision.vm_moid("web01") == "vm-42"
+
+
+def test_power_and_console_target_the_recorded_vm(monkeypatch):
+    import pytest
+    from app import vsphere
+
+    class FakeVM:
+        def __init__(self, moid, stub):
+            self.moid, self.name = moid, {"vm-42": "web01"}.get(moid, "someone-else")
+            self.config = type("C", (), {"template": False})()
+
+    monkeypatch.setattr(vsphere, "_connect", lambda: type("SI", (), {"_stub": None})())
+    monkeypatch.setattr(vsphere.vim, "VirtualMachine", FakeVM)
+    assert vsphere._find_vm_locked("web01", "vm-42").moid == "vm-42"
+    with pytest.raises(LookupError):
+        vsphere._find_vm_locked("web01", "vm-77")  # the id now belongs to another VM
+
+    # No id recorded: only an unambiguous, non-template match.
+    rows = [{"name": "web01", "config.template": False, "_obj": "a"},
+            {"name": "web01", "config.template": True, "_obj": "tmpl"}]
+    monkeypatch.setattr(vsphere, "_collect", lambda props: rows)
+    assert vsphere._find_vm_locked("web01", None) == "a"
+    rows.append({"name": "web01", "config.template": False, "_obj": "b"})
+    with pytest.raises(LookupError, match="More than one"):
+        vsphere._find_vm_locked("web01", None)

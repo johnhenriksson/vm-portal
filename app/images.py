@@ -263,13 +263,16 @@ def migrate_legacy() -> None:
     if not img or not img.usable or db.one("SELECT 1 FROM image_settings WHERE image_id=?", (img.id,)):
         return
     stored = db.load_settings()
+    # Only keys that no current version writes prove a pre-catalog database. VM rows or a
+    # stored vm_user don't: a current install that never saved Ubuntu image settings has
+    # those too, and treating it as legacy would turn TLS verification off below.
     legacy = {k: stored[k] for k in ("packer_iso_url", "packer_cpus", "packer_memory_mb", "packer_disk_mb",
-                                    "template_keep", "vm_user") if k in stored}
-    if not legacy and not db.one("SELECT 1 FROM vms LIMIT 1"):
-        return  # a fresh install: nothing to carry over
+                                    "template_keep") if k in stored}
+    if not legacy:
+        return  # a current or fresh install: nothing to carry over
     data = {"iso_url": legacy.get("packer_iso_url", ""), "keep": legacy.get("template_keep", 3),
             # The old template hardcoded user "ubnt" and a Swedish keyboard.
-            "params": {"ssh_username": legacy.get("vm_user", "ubnt"), "keyboard_layout": "se"}}
+            "params": {"ssh_username": stored.get("vm_user", "ubnt"), "keyboard_layout": "se"}}
     for old, new in (("packer_cpus", "cpus"), ("packer_memory_mb", "memory_mb"), ("packer_disk_mb", "disk_mb")):
         if old in legacy:
             data[new] = legacy[old]
@@ -279,7 +282,10 @@ def migrate_legacy() -> None:
         log.error("Could not migrate the old Packer settings: %s", e)
         return
     if "vsphere_insecure" not in stored and stored.get("vsphere_server"):
-        # Keep the old default (skip verification) for an existing vCenter config.
+        # Pre-catalog versions skipped verification by default; keep that for their existing
+        # vCenter config so the upgrade doesn't break it, and say so in the audit log.
         db.save_settings({"vsphere_insecure": True}, set(), by="migration")
+        db.audit("settings.vsphere_insecure_kept",
+                 "upgrade kept the old default: TLS certificate verification is off; turn it on in Settings")
     db.audit("images.migrated", f"old Packer settings moved to image {img.id}")
     log.info("Moved the old Packer settings to image %s", img.id)

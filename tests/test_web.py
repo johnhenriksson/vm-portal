@@ -72,6 +72,32 @@ def test_login_is_throttled():
         assert login(c).status_code == 429  # even the right password, for a while
 
 
+def test_login_lockout_does_not_lock_out_the_owner_elsewhere():
+    from app import users
+    for _ in range(5):
+        users.login_failed("admin", "203.0.113.9")   # an attacker's IP
+    assert users.login_retry_after("admin", "203.0.113.9")
+    assert not users.login_retry_after("admin", "testclient")  # the owner's IP is not blocked
+    with client() as c:
+        assert login(c).status_code == 303
+    for i in range(25):                                # spread over many IPs: per-username cap
+        users.login_failed("admin", f"198.51.100.{i}")
+    assert users.login_retry_after("admin", "192.0.2.1")
+
+
+def test_password_change_is_throttled():
+    with client() as c:
+        login(c)
+        token = csrf(c, "/account")
+        for _ in range(5):
+            r = c.post("/account/password", data={"csrf_token": token, "current": "guess-guess-guess",
+                                                  "password": "x", "confirm": "x"})
+            assert "current password is wrong" in r.text
+        r = c.post("/account/password", data={"csrf_token": token, "current": "test-password-123",
+                                              "password": "x", "confirm": "x"})
+        assert "Too many wrong passwords" in r.text
+
+
 def test_create_rejects_bad_name(monkeypatch):
     from app import config
     monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
@@ -119,6 +145,29 @@ def test_regular_user_isolation():
         login(c, "alice", "purple-otter-41")
         assert c.get("/vms/alice-vm").status_code == 200
         assert c.get(f"/jobs/{job}").status_code == 200
+
+
+def test_logout_revokes_a_copied_cookie_but_not_other_sessions():
+    with client() as c, client() as other, client() as thief:
+        login(c)
+        login(other)
+        thief.cookies.set("vmportal_session", c.cookies.get("vmportal_session"))
+        assert thief.get("/", follow_redirects=False).status_code == 200
+        c.post("/logout", data={"csrf_token": csrf(c, "/")})
+        assert thief.get("/", follow_redirects=False).status_code == 303   # copy is dead
+        assert other.get("/", follow_redirects=False).status_code == 200   # other device still logged in
+
+
+def test_console_guard_ends_on_logout():
+    from app import auth, users
+    with client() as c:
+        login(c)
+        session = {"uid": users.by_name("admin")["id"], "sv": users.by_name("admin")["session_version"],
+                   "sid": "handshake-sid"}
+        assert auth.session_user(session) is not None
+        from app import db
+        db.revoke_session("handshake-sid", auth.SESSION_MAX_AGE)
+        assert auth.session_user(session) is None   # what the console guard re-checks
 
 
 def test_password_change_ends_other_sessions():
@@ -226,6 +275,26 @@ def test_placement_dropdowns(fake_inventory):
         assert c.post("/settings/vcenter/placement", data={"vsphere_server": "x"}).status_code == 403  # no CSRF
 
 
+def test_env_password_is_never_sent_to_another_server(fake_inventory, monkeypatch):
+    # The password comes from the environment, the server from the UI.
+    from app import config, db
+    monkeypatch.setenv("VSPHERE_PASSWORD", "env-secret")
+    db.save_settings({"vsphere_server": "vc.lab", "vsphere_user": "u"}, set(), by="test")
+    config.get_settings.cache_clear()
+    with client() as c:
+        login(c)
+        token = csrf(c, "/settings/vcenter")
+        evil = {"csrf_token": token, "vsphere_server": "attacker.example", "vsphere_user": "u",
+                "vsphere_insecure": "on"}
+        r = c.post("/settings/vcenter/placement", data=evil)
+        assert "set VSPHERE_SERVER in the environment" in r.text and fake_inventory == {}
+        r = c.post("/settings/vcenter", data=evil)
+        assert r.status_code == 400 and config.get_settings().vsphere_server == "vc.lab"
+        # The configured server still works with the env password.
+        r = c.post("/settings/vcenter/placement", data={**evil, "vsphere_server": "vc.lab"})
+        assert fake_inventory == {"server": "vc.lab", "password": "env-secret"}
+
+
 def test_placement_flags_missing_and_falls_back(fake_inventory, monkeypatch):
     from app import vsphere
     with client() as c:
@@ -282,6 +351,31 @@ def test_role_change_takes_effect_immediately():
         assert bob.get("/settings/vcenter", follow_redirects=False).status_code == 303  # session ended
 
 
+def test_creating_admin_credentials_needs_the_acting_admins_password():
+    # Otherwise a stolen admin session could mint an admin it knows the password of.
+    from app import users
+    with client() as c:
+        login(c)
+        token = csrf(c, "/settings/users")
+        new = {"csrf_token": token, "username": "svc-backup", "password": "orange-falcon-93", "role": "admin"}
+        r = c.post("/settings/users", data=new)
+        assert r.status_code == 400 and users.by_name("svc-backup") is None
+        r = c.post("/settings/users", data={**new, "confirm": "test-password-123"}, follow_redirects=False)
+        assert r.status_code == 303 and users.by_name("svc-backup")["role"] == "admin"
+        # A regular user needs no confirmation; promoting one and resetting a password do.
+        c.post("/settings/users", data={**new, "username": "carol", "role": "user"})
+        carol = users.by_name("carol")
+        assert carol["role"] == "user"
+        assert c.post(f"/settings/users/{carol['id']}/role", data={"csrf_token": token, "role": "admin"}).status_code == 400
+        assert users.by_name("carol")["role"] == "user"
+        c.post(f"/settings/users/{carol['id']}/role", data={"csrf_token": token, "role": "admin",
+                                                           "confirm": "test-password-123"})
+        assert users.by_name("carol")["role"] == "admin"
+        r = c.post(f"/settings/users/{carol['id']}/password", data={"csrf_token": token,
+                                                                   "password": "brand-new-secret-77"})
+        assert r.status_code == 400 and users.by_name("carol")["password_hash"] == carol["password_hash"]
+
+
 def test_invalid_stored_setting_is_ignored():
     from app import config, db
     db.save_settings({"template_max_age_days": 99999, "default_cpus": 4}, set(), by="test")
@@ -297,6 +391,24 @@ def test_iso_picker(monkeypatch):
         login(c)
         r = c.get("/images/defs/ubuntu-26.04/isos")
         assert "Installer ISO" in r.text and '<option value="[ds1] ISO/ubuntu.iso"' in r.text
+
+
+def test_create_fails_closed_when_templates_cannot_be_listed(monkeypatch):
+    # Without the list, `template` could name any VM in vCenter and Terraform would clone it.
+    from app import provision, vsphere
+    monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
+
+    def down():
+        raise RuntimeError("vCenter hiccup")
+    monkeypatch.setattr(vsphere, "templates", down)
+    created = []
+    monkeypatch.setattr(provision, "create", lambda req, owner_id=None: created.append(req) or 1)
+    with client() as c:
+        login(c)
+        r = c.post("/vms", data={"name": "good-name", "template": "domain-controller", "cpus": 2,
+                                 "memory_mb": 2048, "disk_gb": 40, "ssh_keys": "ssh-ed25519 AAAAkey a@b",
+                                 "csrf_token": csrf(c, "/vms/new")})
+        assert r.status_code == 400 and "vCenter hiccup" in r.text and not created
 
 
 def test_create_with_console_password_is_not_echoed(monkeypatch):

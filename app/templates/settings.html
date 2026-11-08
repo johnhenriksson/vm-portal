@@ -126,15 +126,25 @@
         <details class="menu">
           <summary>More</summary>
           <div class="menu-list" style="min-width:260px">
+            {% if u.role == "admin" %}
             <form method="post" action="/settings/users/{{ u.id }}/role">{{ csrf_field(request) }}
-              <input type="hidden" name="role" value="{{ 'user' if u.role == 'admin' else 'admin' }}">
-              <button>{{ "Make regular user" if u.role == "admin" else "Make admin" }}</button></form>
+              <input type="hidden" name="role" value="user">
+              <button>Make regular user</button></form>
+            {% else %}
+            <form method="post" action="/settings/users/{{ u.id }}/role" class="menu-form">{{ csrf_field(request) }}
+              <input type="hidden" name="role" value="admin">
+              <span class="label">Make admin (your password)</span>
+              <input type="password" name="confirm" required maxlength="256" autocomplete="current-password">
+              <button class="btn-sm btn-outline">Make admin</button></form>
+            {% endif %}
             <form method="post" action="/settings/users/{{ u.id }}/disable">{{ csrf_field(request) }}
               <button>{{ "Enable" if u.disabled else "Disable" }}</button></form>
             <hr>
             <form method="post" action="/settings/users/{{ u.id }}/password" class="menu-form">{{ csrf_field(request) }}
               <span class="label">Set new password</span>
               <input type="password" name="password" required minlength="12" maxlength="256" autocomplete="new-password">
+              <span class="label">Your password</span>
+              <input type="password" name="confirm" required maxlength="256" autocomplete="current-password">
               <button class="btn-sm btn-outline">Set password</button></form>
             <hr>
             <form method="post" action="/settings/users/{{ u.id }}/delete" data-confirm="Delete user {{ u.username }}?">{{ csrf_field(request) }}
@@ -163,6 +173,9 @@
     <label class="field"><span class="label">Initial password</span>
       <input type="password" name="password" required minlength="12" maxlength="256" autocomplete="new-password">
       <span class="hint">At least 12 characters. Share it securely; they can change it under Account.</span></label>
+    <label class="field"><span class="label">Your password</span>
+      <input type="password" name="confirm" maxlength="256" autocomplete="current-password">
+      <span class="hint">Only needed to add an admin.</span></label>
     <button type="submit">Add user</button>
   </div>
 </form>

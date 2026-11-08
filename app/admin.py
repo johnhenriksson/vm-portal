@@ -131,7 +131,11 @@ async def change_password(request: Request, user: dict = Depends(require_user), 
     def fail(msg: str):
         return render(request, "account.html", status_code=400, error=msg)
 
+    # Throttled like the step-up confirmation, so a stolen session can't guess the password.
+    if users.user_throttle.retry_after(user["username"]):
+        return fail("Too many wrong passwords. Try again later.")
     if not await asyncio.to_thread(users.verify_password, current, user["password_hash"]):
+        users.user_throttle.fail(user["username"])
         audit(request, user, "account.password_failed")
         return fail("Your current password is wrong")
     if password != confirm:
@@ -309,14 +313,19 @@ def check_confirmations(request: Request, user: dict, changes: dict, form) -> No
         raise ValueError("Open the portal over HTTPS first: turning this on over plain HTTP would log "
                          "everyone out, because browsers would stop sending the session cookie. If you are "
                          "using HTTPS, the proxy isn't trusted: set FORWARDED_ALLOW_IPS to its address")
+    labels = ", ".join(FIELDS[k]["label"] for k in sorted(turning_on))
+    confirm_password(request, user, form.get("confirm_password"), ", ".join(sorted(turning_on)),
+                     f"Enter your password to turn on: {labels}")
+
+
+def confirm_password(request: Request, user: dict, password, what: str, message: str) -> None:
+    """Step-up check: the acting admin's own password (throttled). Raises ValueError(message)."""
     if users.user_throttle.retry_after(user["username"]):
         raise ValueError("Too many wrong passwords. Try again later.")
-    password = form.get("confirm_password")
     if not isinstance(password, str) or not users.verify_password(password, user["password_hash"]):
         users.user_throttle.fail(user["username"])
-        audit(request, user, "settings.confirm_failed", ", ".join(sorted(turning_on)))
-        labels = ", ".join(FIELDS[k]["label"] for k in sorted(turning_on))
-        raise ValueError(f"Enter your password to turn on: {labels}")
+        audit(request, user, "settings.confirm_failed", what)
+        raise ValueError(message)
 
 
 @router.get("/settings", dependencies=[Depends(require_admin)])
@@ -351,10 +360,17 @@ def _form_changes(section: str, form, locked: set[str]) -> dict:
         else:
             changes[key] = raw.strip()
     # Don't let a changed server receive the stored password: require it to be re-entered.
+    # A password from the environment can't be re-entered here, so it stays with the server
+    # it was configured for: once a server is set, that server must change in the
+    # environment too. (Pointing the UI at another host would send it the env password.)
     server = changes.get("vsphere_server", current.vsphere_server)
     if (section == "vcenter" and server != current.vsphere_server and current.vsphere_password
-            and "vsphere_password" not in changes and "vsphere_password" not in locked):
-        raise ValueError("Re-enter the password when you change the server")
+            and "vsphere_password" not in changes):
+        if "vsphere_password" not in locked:
+            raise ValueError("Re-enter the password when you change the server")
+        if current.vsphere_server:
+            raise ValueError("The password is set in the environment (VSPHERE_PASSWORD), so the server can't be "
+                             "changed here: set VSPHERE_SERVER in the environment as well")
     return changes
 
 
@@ -502,10 +518,17 @@ def _target_user(uid: int, me: dict) -> dict:
     return u
 
 
+# Creating credentials someone knows for an admin account (a new admin, a promotion, a
+# password reset) needs the acting admin's password, like the sensitive switches do:
+# otherwise a stolen session could mint an admin it controls and pass that confirmation.
+
 @router.post("/settings/users")
 async def user_create(request: Request, user: dict = Depends(require_admin), username: str = Form(""),
-                      password: str = Form(""), role: str = Form("user")):
+                      password: str = Form(""), role: str = Form("user"), confirm: str = Form("")):
     try:
+        if role == "admin":
+            await asyncio.to_thread(confirm_password, request, user, confirm, "user.create admin",
+                                    "Enter your password to add an admin")
         await asyncio.to_thread(users.create, username, password, role)
     except ValueError as e:
         return render_settings(request, "users", status_code=400, error=str(e), new_username=username)
@@ -514,10 +537,17 @@ async def user_create(request: Request, user: dict = Depends(require_admin), use
 
 
 @router.post("/settings/users/{uid}/role")
-async def user_role(request: Request, uid: int, user: dict = Depends(require_admin), role: str = Form("")):
+async def user_role(request: Request, uid: int, user: dict = Depends(require_admin), role: str = Form(""),
+                    confirm: str = Form("")):
     u = _target_user(uid, user)
     if role not in users.ROLES:
         raise HTTPException(400, "Unknown role")
+    if role == "admin" and u["role"] != "admin":
+        try:
+            await asyncio.to_thread(confirm_password, request, user, confirm, f"user.role {u['username']}",
+                                    f"Enter your password to make {u['username']} an admin")
+        except ValueError as e:
+            return render_settings(request, "users", status_code=400, error=str(e))
     # Bumping session_version makes the new role take effect on a fresh login.
     db.execute("UPDATE users SET role=?, session_version=session_version+1 WHERE id=?", (role, uid))
     audit(request, user, "user.role", f"{u['username']} -> {role}")
@@ -535,9 +565,11 @@ async def user_disable(request: Request, uid: int, user: dict = Depends(require_
 
 @router.post("/settings/users/{uid}/password")
 async def user_password(request: Request, uid: int, user: dict = Depends(require_admin),
-                        password: str = Form("")):
+                        password: str = Form(""), confirm: str = Form("")):
     u = _target_user(uid, user)
     try:
+        await asyncio.to_thread(confirm_password, request, user, confirm, f"user.password {u['username']}",
+                                f"Enter your own password to set a new password for {u['username']}")
         await asyncio.to_thread(users.set_password, uid, password)
     except ValueError as e:
         return render_settings(request, "users", status_code=400, error=f"{u['username']}: {e}")

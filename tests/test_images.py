@@ -82,6 +82,18 @@ def test_fresh_install_has_no_migration():
     assert db.one("SELECT 1 FROM image_settings") is None
 
 
+def test_current_install_with_vms_keeps_tls_verification():
+    # A current install stores vsphere_insecure only when it differs from the secure default,
+    # so VMs and a vm_user without any pre-catalog key must not count as legacy.
+    from app import db
+    db.save_settings({"vm_user": "ops", "vsphere_server": "vc"}, set(), by="test")
+    db.execute("INSERT INTO vms (name,status,template,cpus,memory_mb,disk_gb,ip_mode,created_at)"
+               " VALUES ('web01','ready','t',2,4096,40,'dhcp',?)", (db.now(),))
+    images.migrate_legacy()
+    assert "vsphere_insecure" not in db.load_settings()
+    assert db.one("SELECT 1 FROM image_settings") is None
+
+
 def test_all_builtin_definitions_are_valid():
     builtin = {i.id: i for i in images.catalog() if i.builtin}
     assert {"ubuntu-26.04", "debian-13", "rocky-10"} <= set(builtin)

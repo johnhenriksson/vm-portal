@@ -164,7 +164,38 @@ class Throttle:
 
 
 ip_throttle = Throttle(limit=10, window=15 * 60)
+# Password re-checks by a logged-in user (step-up confirmation, password change), per username.
 user_throttle = Throttle(limit=5, window=15 * 60)
+# Logins. Five failures for a username lock out only the IPs they came from, so one
+# attacker can't lock the real owner out; the per-username cap still bounds guessing
+# spread over many IPs (each also limited by ip_throttle).
+login_pair_throttle = Throttle(limit=5, window=15 * 60)
+login_user_cap = Throttle(limit=25, window=15 * 60)
+
+
+def _pair(username: str, ip: str) -> str:
+    return f"{username}\0{ip}"
+
+
+def login_retry_after(username: str, ip: str) -> int:
+    return max(ip_throttle.retry_after(ip), login_pair_throttle.retry_after(_pair(username, ip)),
+               login_user_cap.retry_after(username))
+
+
+def login_failed(username: str, ip: str) -> None:
+    ip_throttle.fail(ip)
+    login_pair_throttle.fail(_pair(username, ip))
+    login_user_cap.fail(username)
+
+
+def login_succeeded(username: str, ip: str) -> None:
+    ip_throttle.reset(ip)
+    login_pair_throttle.reset(_pair(username, ip))
+
+
+def clear_throttles() -> None:
+    for t in (ip_throttle, user_throttle, login_pair_throttle, login_user_cap):
+        t.clear()
 
 
 # --- first run ---------------------------------------------------------------

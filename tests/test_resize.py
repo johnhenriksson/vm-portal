@@ -87,7 +87,8 @@ def fake_vm(data_dir, monkeypatch):
     (d / "state.json").write_text(json.dumps({"values": {"root_module": {"resources": [
         {"address": "vsphere_virtual_machine.this", "values": VM_VALUES}]}}}))
     (d / "terraform.tfvars.json").write_text(json.dumps({"name": "web01", "cpus": 2, "memory_mb": 4096,
-                                                         "disk_gb": 40, "userdata": "#cloud-config keep"}))
+                                                         "disk_gb": 40, "userdata": "#cloud-config keep",
+                                                         "vsphere_server": "old-vc", "vsphere_insecure": True}))
     (d / "plan.json").write_text(json.dumps(plan({"num_cpus": 4})))
     db.execute("INSERT INTO vms (name,status,template,cpus,memory_mb,disk_gb,ip_mode,created_at,owner_id)"
                " VALUES ('web01','ready','ubuntu-2604-docker-20260101-0000',2,4096,40,'dhcp',?,NULL)", (db.now(),))
@@ -106,6 +107,7 @@ async def test_resize_job_updates_vm_and_keeps_first_boot_data(fake_vm):
     assert status == "succeeded", log
     tfvars = json.loads((fake_vm / "terraform.tfvars.json").read_text())
     assert tfvars["userdata"] == "#cloud-config keep"           # first-boot data untouched
+    assert "vsphere_insecure" not in tfvars and "vsphere_server" not in tfvars  # current settings apply
     assert tfvars["template_facts"]["uuid"] == "tmpl-uuid"      # no template lookup needed any more
     assert (tfvars["cpus"], tfvars["memory_mb"], tfvars["disk_gb"]) == (4, 8192, 60)
     row = db.active_vm("web01")

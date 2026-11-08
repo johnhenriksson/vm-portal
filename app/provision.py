@@ -93,10 +93,20 @@ def render_userdata(req: VMRequest) -> str:
     return guests.get(req.guest).tfvars(req)["userdata"]
 
 
+# vCenter connection variables. They always come from the current settings through the
+# environment, never from a VM's tfvars file: values written there at create time would
+# outlive a later change (TLS verification turned on, a new server) and pair the current
+# password with the old connection. tfvars.json beats TF_VAR_*, so they must not be in it.
+CONNECTION_VARS = ("vsphere_server", "vsphere_user", "vsphere_insecure")
+
+
 def tf_env() -> dict[str, str]:
     s = get_settings()
     return {
+        "TF_VAR_vsphere_server": s.vsphere_server,
+        "TF_VAR_vsphere_user": s.vsphere_user,
         "TF_VAR_vsphere_password": s.vsphere_password,
+        "TF_VAR_vsphere_insecure": "true" if s.vsphere_insecure else "false",
         "TF_IN_AUTOMATION": "1",
         "TF_INPUT": "0",
         "CHECKPOINT_DISABLE": "1",
@@ -110,9 +120,6 @@ def vm_dir(name: str) -> Path:
 def tfvars(req: VMRequest) -> dict:
     s = get_settings()
     return {
-        "vsphere_server": s.vsphere_server,
-        "vsphere_user": s.vsphere_user,
-        "vsphere_insecure": s.vsphere_insecure,
         "datacenter": s.vsphere_datacenter,
         "cluster": s.vsphere_cluster,
         "datastore": s.vsphere_datastore,
@@ -195,6 +202,21 @@ def destroy(vm: dict, user_id: int | None = None) -> int:
 
 # --- existing VMs ---------------------------------------------------------------------
 
+def vm_moid(name: str) -> str | None:
+    """The VM's vCenter managed object id, from its Terraform state (None if unknown)."""
+    try:
+        state = json.loads((vm_dir(name) / "terraform.tfstate").read_text())
+    except (OSError, ValueError):
+        return None
+    for r in state.get("resources") or []:
+        if r.get("type") == "vsphere_virtual_machine" and r.get("name") == "this" and r.get("mode") != "data":
+            for inst in r.get("instances") or []:
+                moid = (inst.get("attributes") or {}).get("moid")
+                if isinstance(moid, str) and moid:
+                    return moid
+    return None
+
+
 async def prepare_workspace(d: Path, log: jobs.JobLog) -> None:
     """Bring an existing VM's working directory up to date before planning against it.
 
@@ -204,6 +226,9 @@ async def prepare_workspace(d: Path, log: jobs.JobLog) -> None:
     module = get_settings().terraform_module_dir
     for f in module.glob("*.tf"):
         shutil.copyfile(f, d / f.name)
+    # Older portals wrote the connection settings into tfvars; drop them so the current
+    # ones (from tf_env) apply.
+    update_tfvars(d, _drop=CONNECTION_VARS)
     await log.run([TOFU, "init", "-no-color", "-input=false", "-upgrade"], cwd=d, env=tf_env())
     if TOFU.endswith("tofu") and LEGACY_PROVIDER in (d / "terraform.tfstate").read_text():
         log.step("Moving Terraform-era state to the OpenTofu provider address (backup kept)")
@@ -242,10 +267,12 @@ def actual_size(show: dict) -> dict | None:
         return None
 
 
-def update_tfvars(d: Path, **values) -> None:
+def update_tfvars(d: Path, _drop: tuple[str, ...] = (), **values) -> None:
     """Change some variables, keeping the rest (first-boot data, password hash) as created."""
     path = d / "terraform.tfvars.json"
     data = json.loads(path.read_text())
+    for k in _drop:
+        data.pop(k, None)
     data.update(values)
     tmp = path.with_suffix(".tmp")
     tmp.unlink(missing_ok=True)
