@@ -46,6 +46,10 @@ class Bootstrap(BaseSettings):
     # Private key Packer logs in with. Unset: the portal generates one in data_dir.
     packer_ssh_key: Path | None = None
     terraform_module_dir: Path = APP_DIR.parent / "terraform" / "vm"
+    # Scheduled backups are written here (mount another disk or a network share).
+    backup_dir: Path = Path("/backups")
+    # Largest backup the portal reads or writes (uploads, restores), in MB.
+    backup_max_mb: int = Field(512, ge=16, le=8192)
 
     @property
     def jobs_dir(self) -> Path:
@@ -118,6 +122,14 @@ class Settings(Bootstrap):
     # overrides it if it ever does.
     https_only_cookies: bool = False
 
+    # Scheduled backups: full backups written to BACKUP_DIR, encrypted to these age public
+    # keys. The portal can't read them back: the matching secret keys stay offline.
+    backup_enabled: bool = False
+    backup_interval_hours: int = Field(24, ge=1, le=168)
+    backup_keep: int = Field(14, ge=1, le=1000)
+    backup_recipients: Annotated[list[str], NoDecode] = []   # env: separated by "|" or ","
+    backup_include_logs: bool = False
+
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings,
                                    file_secret_settings):
@@ -133,6 +145,29 @@ class Settings(Bootstrap):
     @classmethod
     def _split_keys(cls, v):
         return [x.strip() for x in re.split(r"[|\n]", v) if x.strip()] if isinstance(v, str) else v
+
+    @field_validator("backup_recipients", mode="before")
+    @classmethod
+    def _split_recipients(cls, v):
+        return [x.strip() for x in re.split(r"[|,\n]", v) if x.strip()] if isinstance(v, str) else v
+
+    @field_validator("backup_recipients")
+    @classmethod
+    def _recipients(cls, v: list[str]) -> list[str]:
+        from .backup.archive import parse_recipient
+        for r in v:
+            if not r.startswith("age1") or len(r) > 100:
+                raise ValueError(f"not an age public key (age1…): {r[:20]}…")
+            parse_recipient(r)
+        if len(v) > 20:
+            raise ValueError("at most 20 public keys")
+        return list(dict.fromkeys(v))
+
+    @model_validator(mode="after")
+    def _backup(self):
+        if self.backup_enabled and not self.backup_recipients:
+            raise ValueError("Scheduled backups need at least one age public key to encrypt to")
+        return self
 
     @field_validator("vsphere_server")
     @classmethod
@@ -209,6 +244,7 @@ SECTIONS: dict[str, list[str]] = {
     "ssh-keys": ["default_ssh_keys"],
     "templates": ["template_prefixes", "template_max_age_days", "packer_http_ip", "allow_image_editing"],
     "security": ["https_only_cookies"],
+    "backup": ["backup_enabled", "backup_interval_hours", "backup_keep", "backup_recipients", "backup_include_logs"],
 }
 EDITABLE = {f for fields in SECTIONS.values() for f in fields}
 SECRET_FIELDS = {"vsphere_password"}

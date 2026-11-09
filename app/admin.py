@@ -185,13 +185,21 @@ FIELDS: dict[str, dict] = {
                             "type": "bool", "confirm": True,
                             "hint": "Definitions are code: Packer runs them inside the portal with the vCenter "
                                     "credentials. Only turn this on if you trust every admin with that."},
+    "backup_enabled": {"label": "Make scheduled backups", "type": "bool",
+                       "hint": "Full backups of the portal, written to the backup folder"},
+    "backup_interval_hours": {"label": "Every (hours)", "type": "number"},
+    "backup_keep": {"label": "Keep the newest", "type": "number", "hint": "Older scheduled backups are deleted"},
+    "backup_recipients": {"label": "Encrypt to these age public keys", "type": "list", "mono": True,
+                          "hint": "age1… keys, comma separated. Keep the matching secret keys away from the portal: "
+                                  "it can then write backups but never read them."},
+    "backup_include_logs": {"label": "Include job logs", "type": "bool"},
     "https_only_cookies": {"label": "HTTPS only (Secure cookies and HSTS)", "type": "bool", "confirm": True,
                            "hint": "Turn on when the portal is served over HTTPS, normally behind a reverse proxy. "
                                    "Browsers then never send the session over plain HTTP."},
 }
 TABS = [("vcenter", "vCenter"), ("network", "Network"), ("vms", "VM defaults"), ("ssh-keys", "SSH keys"),
-        ("templates", "Images"), ("security", "Security"), ("users", "Users"), ("audit", "Audit log"),
-        ("system", "System")]
+        ("templates", "Images"), ("security", "Security"), ("users", "Users"), ("backup", "Backup"),
+        ("audit", "Audit log"), ("system", "System")]
 # Turning these on needs the admin's password, so a hijacked session can't quietly do it.
 CONFIRM_TO_ENABLE = {k for k, v in FIELDS.items() if v.get("confirm")}
 
@@ -246,6 +254,9 @@ def render_settings(request: Request, section: str, status_code: int = 200, subm
         data["system"] = system_info(request)
     if section == "audit":
         data["entries"] = db.query("SELECT * FROM audit ORDER BY id DESC LIMIT 200")
+    if section == "backup":
+        from .routes_backup import backup_context
+        data.update(backup_context(request))
     return render(request, "settings.html", status_code=status_code, **data, **ctx)
 
 

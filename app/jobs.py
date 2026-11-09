@@ -15,8 +15,16 @@ _tasks: set[asyncio.Task] = set()
 _locks: dict[str, asyncio.Lock] = {}
 
 
+# Set while a backup is being restored: no job may start (they'd write into data being replaced).
+paused: str | None = None
+
+
 class JobFailed(Exception):
     pass
+
+
+def running() -> int:
+    return sum(1 for t in _tasks if not t.done())
 
 
 def lock_for(key: str) -> asyncio.Lock:
@@ -95,6 +103,8 @@ def submit(kind: str, target: str, fn: JobFn, *, lock_key: str, user_id: int | N
            on_success: Callable[[], None] | None = None,
            on_failure: Callable[[], None] | None = None) -> int:
     """Create a job record and run fn in the background, one job per lock_key at a time."""
+    if paused:
+        raise ValueError(paused)
     job_id = db.create_job(kind, target, user_id)
 
     async def runner() -> None:

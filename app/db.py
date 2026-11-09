@@ -96,15 +96,51 @@ def conn() -> sqlite3.Connection:
         path = get_bootstrap().db_path
         _conn = sqlite3.connect(path, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA foreign_keys = ON")
-        _conn.executescript(SCHEMA)
-        for table, col, definition in MIGRATIONS:
-            cols = {r["name"] for r in _conn.execute(f"PRAGMA table_info({table})")}
-            if col not in cols:
-                _conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
-        _conn.commit()
+        init_schema(_conn)
         path.chmod(0o600)  # holds password hashes and encrypted secrets
     return _conn
+
+
+def init_schema(c: sqlite3.Connection) -> None:
+    c.execute("PRAGMA foreign_keys = ON")
+    c.executescript(SCHEMA)
+    for table, col, definition in MIGRATIONS:
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+    c.commit()
+
+
+def close() -> None:
+    """Close the connection (a restore swaps the database file); the next query reopens it."""
+    global _conn
+    with _lock:
+        if _conn is not None:
+            _conn.close()
+            _conn = None
+
+
+def dump(tables: tuple[str, ...]) -> dict[str, list[dict]]:
+    """Every row of these tables, read in one transaction so they match each other."""
+    with _lock:
+        c = conn()
+        c.execute("BEGIN")
+        try:
+            return {t: [dict(r) for r in c.execute(f"SELECT * FROM {t} ORDER BY rowid")] for t in tables}
+        finally:
+            c.execute("COMMIT")
+
+
+def get_meta(key: str, default=None):
+    """A portal-internal value in the settings table (never one of the editable settings)."""
+    row = one("SELECT value FROM settings WHERE key=?", (key,))
+    return json.loads(row["value"]) if row else default
+
+
+def set_meta(key: str, value) -> None:
+    execute("INSERT INTO settings (key, value, encrypted, updated_at, updated_by) VALUES (?, ?, 0, ?, 'system')"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, json.dumps(value), now()))
 
 
 def query(sql: str, args: tuple = ()) -> list[dict]:

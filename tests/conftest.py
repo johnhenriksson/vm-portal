@@ -22,13 +22,16 @@ os.environ.update({
 
 @pytest.fixture(autouse=True)
 def data_dir(tmp_path, monkeypatch):
-    from app import config, db, users
+    from app import auth, config, db, jobs, users
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)  # don't pick up a developer's .env
     config.reset_caches()
     db._conn = None
     users.clear_throttles()
     users.setup_token = None
+    auth.reset_session_epoch()
+    jobs.paused = None
     yield tmp_path
     config.reset_caches()
     db._conn = None
+    auth.reset_session_epoch()

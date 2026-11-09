@@ -73,7 +73,7 @@ COPY app ./app
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
 
 RUN useradd --uid 1000 --create-home portal \
- && mkdir -p /data && chown portal:portal /data
+ && mkdir -p /data /backups && chown portal:portal /data /backups && chmod 0700 /backups
 USER portal
 
 ENV DATA_DIR=/data PYTHONUNBUFFERED=1 PORT=8080

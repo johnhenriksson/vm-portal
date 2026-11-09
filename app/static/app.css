@@ -437,6 +437,9 @@ pre.log {
   .grid-2, .grid-3, .info-panel .cols { grid-template-columns: 1fr; }
   .stepbar { padding: .75rem 1rem; }
   .stepbar .line { display: none; }
+  /* Tab bars scroll sideways instead of widening the page. */
+  .tabs { overflow-x: auto; scrollbar-width: thin; }
+  .tabs a, .tabs label { flex: none; white-space: nowrap; }
 }
 
 /* ---- settings ---------------------------------------------------------- */
@@ -537,3 +540,11 @@ pre.check { background: var(--bg-subtle); border: 1px solid var(--border); borde
 .new-def > summary::before { content: "+"; color: var(--blue); width: 1ch; }
 .new-def[open] > summary::before { content: "–"; }
 .new-def:not([open]) > summary { border-bottom: 0; }
+
+/* Settings → Backup */
+.check-list { margin: -.75rem 0 1.25rem 1.75rem; max-height: 12rem; overflow-y: auto; }
+.check-list .check-field { margin-bottom: .4rem; }
+.card-body hr { margin: 1.25rem 0; }
+.backup-summary { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1.25rem; margin: 0 0 1.25rem; }
+.backup-summary dt { color: var(--muted); }
+.backup-summary dd { margin: 0; }

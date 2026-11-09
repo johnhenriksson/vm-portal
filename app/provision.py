@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import bcrypt
@@ -182,6 +183,7 @@ def destroy(vm: dict, user_id: int | None = None) -> int:
             log.step("No Terraform state; nothing to destroy in vCenter")
         else:
             log.step(f"Destroying {vm['name']}")
+            keep_state_history(d)
             await prepare_workspace(d, log)
             await log.run([TOFU, "destroy", "-no-color", "-input=false", "-auto-approve"], cwd=d, env=tf_env())
         archive = get_settings().data_dir / "destroyed" / f"{vm['name']}-{vm['id']}"
@@ -201,6 +203,43 @@ def destroy(vm: dict, user_id: int | None = None) -> int:
 
 
 # --- existing VMs ---------------------------------------------------------------------
+
+STATE_HISTORY = 5
+HISTORY_RE = re.compile(r"^[0-9]{8}T[0-9]{12}Z\.tfstate$")
+
+
+def keep_state_history(d: Path) -> None:
+    """Copy the VM's state aside before something changes it; keep the newest few.
+    A damaged state can then be rolled back without a full restore."""
+    src = d / "terraform.tfstate"
+    if not src.is_file() or src.is_symlink():
+        return
+    hist = d / "history"
+    hist.mkdir(mode=0o700, exist_ok=True)
+    dest = hist / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".tfstate")
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # state holds cloud-init data
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(src.read_bytes())
+    for old in state_history_files(d)[:-STATE_HISTORY]:
+        old.unlink(missing_ok=True)
+
+
+def state_history_files(d: Path) -> list[Path]:
+    hist = d / "history"
+    if not hist.is_dir():
+        return []
+    return sorted(p for p in hist.iterdir() if HISTORY_RE.match(p.name) and p.is_file() and not p.is_symlink())
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """Replace a file atomically with mode 0600 (state and variables hold cloud-init data)."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    tmp.replace(path)
+
 
 def vm_moid(name: str) -> str | None:
     """The VM's vCenter managed object id, from its Terraform state (None if unknown)."""
@@ -351,6 +390,7 @@ def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, use
             info = (await asyncio.to_thread(vsphere.vms_by_name, True)).get(vm["name"])
             if info is None or info.power_state != "poweredOff":
                 raise jobs.JobFailed("Changing vCPUs or memory restarts the VM, and no restart was allowed")
+        keep_state_history(d)
         await prepare_workspace(d, log)
         before = actual_size(await _show_json(d))
         if before and disk_gb < before["disk_gb"]:

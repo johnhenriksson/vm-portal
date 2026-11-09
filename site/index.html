@@ -87,7 +87,8 @@
           <h3>Safe changes to running VMs</h3>
           <p>Every VM has its own OpenTofu state. A resize is applied only if the plan changes nothing
             but CPUs, memory and disk, so a change someone made by hand in vCenter stops the job instead
-            of being undone.</p>
+            of being undone. Encrypted backups, on demand or scheduled, bring back the whole portal or
+            single VMs.</p>
         </article>
         <article class="card">
           <h3>Security from the start</h3>
@@ -171,6 +172,8 @@
           vCenter after first boot.</li>
         <li>Console: ESXi certificate pinned, Origin and ownership checked.</li>
         <li>Strict Content Security Policy, CSRF tokens, login throttling, HTTPS-only mode with HSTS.</li>
+        <li>Backups always encrypted; scheduled ones to age public keys, so the portal can't read them.
+          Nothing in a backup is trusted on restore.</li>
       </ul>
     </div>
   </section>

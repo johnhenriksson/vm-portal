@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Restore · VM Portal{% endblock %}
+{% block public %}
+<div class="login-wrap">
+  <div class="login-card" style="max-width:480px">
+    <div class="brand"><span class="brand-mark">{{ icon("server") }}</span> VM Portal</div>
+    <h1 style="font-size:1.5rem">Restore a full backup</h1>
+    <p class="muted">Brings back the users, settings, VMs and images of the portal the backup was made on. Enter the
+      setup token from the portal's log (<code>docker compose logs portal</code>). Nothing changes until you confirm
+      on the next page.</p>
+    {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/setup/restore" enctype="multipart/form-data">
+      {{ csrf_field(request) }}
+      <label class="field"><span class="label">Setup token</span>
+        <input name="token" required autocomplete="off" class="mono" spellcheck="false"></label>
+      <label class="field"><span class="label">Backup file</span>
+        <input type="file" name="file" accept=".vmpbak" required>
+        <span class="hint">Up to {{ max_mb }} MB (<code>BACKUP_MAX_MB</code>).</span></label>
+      <label class="field"><span class="label">Passphrase or age secret key</span>
+        <input type="password" name="secret" required maxlength="1024" autocomplete="off">
+        <span class="hint">Only used to open the file; not stored.</span></label>
+      <button type="submit" class="btn-block">Open backup</button>
+    </form>
+    <p class="muted" style="margin-top:1.25rem"><a href="/setup">Start with an empty portal instead</a></p>
+  </div>
+</div>
+{% endblock %}

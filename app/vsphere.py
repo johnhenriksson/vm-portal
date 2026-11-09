@@ -244,6 +244,27 @@ def _find_vm_locked(name: str, moid: str | None):
     return matches[0]
 
 
+def vm_facts(moid: str) -> dict | None:
+    """Where a VM really is, by its id (None when vCenter has no such VM): its name,
+    whether it's a template, its notes, datacenter and folder (relative to the
+    datacenter's VM folder, as in Settings)."""
+    with _lock:
+        vm = vim.VirtualMachine(moid, _connect()._stub)
+        try:
+            facts = {"name": vm.name, "template": bool(vm.config.template),
+                     "annotation": vm.config.annotation or ""}
+            parts, node = [], vm.parent
+            while node is not None and not isinstance(node, vim.Datacenter):
+                parts.append(node.name)
+                node = node.parent
+            facts["datacenter"] = node.name if node is not None else ""
+        except vmodl.fault.ManagedObjectNotFound:
+            return None
+    # parts ends with the datacenter's own VM folder ("vm"), which Settings leave out.
+    facts["folder"] = "/".join(reversed(parts[:-1]))
+    return facts
+
+
 def _invalidate() -> None:
     global _cache
     _cache = None

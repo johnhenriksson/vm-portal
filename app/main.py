@@ -9,10 +9,11 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import crypto, db, guests, images, ipam, jobs, provision, users, vsphere
+from . import crypto, datalock, db, guests, images, ipam, jobs, provision, users, vsphere
 from .auth import (SESSION_MAX_AGE, LoginRequired, client_ip, csrf_field, csrf_protect, current_user,
                    end_session, require_admin, require_user, start_session)
 from .config import APP_DIR, PublicSettings, get_bootstrap, get_settings, vcenter_configured
+from .backup import schedule
 from .links import Links
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -22,11 +23,17 @@ log = logging.getLogger("vm-portal")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_settings()
-    db.fail_interrupted_jobs()
-    users.ensure_bootstrap()
-    images.migrate_legacy()
-    yield
-    await asyncio.to_thread(vsphere.close)
+    datalock.acquire()
+    try:
+        db.fail_interrupted_jobs()
+        users.ensure_bootstrap()
+        images.migrate_legacy()
+        schedule.start()
+        yield
+        await schedule.stop()
+        await asyncio.to_thread(vsphere.close)
+    finally:
+        datalock.release()
 
 
 class SessionCookies(SessionMiddleware):
@@ -63,7 +70,11 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    response = await call_next(request)
+    if jobs.paused and request.url.path not in ("/healthz",) and not request.url.path.startswith("/static/"):
+        # A restore is swapping the data in place: nothing may read or write it meanwhile.
+        response = PlainTextResponse(jobs.paused, status_code=503, headers={"Retry-After": "30"})
+    else:
+        response = await call_next(request)
     h = response.headers
     host = request.headers.get("host", "")
     # 'self' doesn't cover ws:// / wss:// in every browser; allow this host's sockets explicitly.
@@ -138,7 +149,9 @@ async def login_form(request: Request):
         return RedirectResponse("/setup", status_code=303)
     if current_user(request):
         return RedirectResponse("/", status_code=303)
-    return render(request, "login.html")
+    notice = "The backup was restored. Log in with an admin account from the backup." \
+        if request.query_params.get("restored") == "1" else None
+    return render(request, "login.html", notice=notice)
 
 
 @app.post("/login")
@@ -201,7 +214,8 @@ async def dashboard(request: Request, user: dict = Depends(require_user)):
     tmpls, err2 = await vcenter(vsphere.templates)
     from .routes_images import group_templates
     return render(request, "dashboard.html", vms=vms, groups=group_templates(tmpls or []),
-                  jobs=visible_jobs(user, 8), error=err or err2)
+                  jobs=visible_jobs(user, 8), error=err or err2,
+                  backup_health=schedule.health() if is_admin(user) else None)
 
 
 @app.get("/partials/vms")
@@ -350,7 +364,9 @@ async def vm_detail(request: Request, name: str, user: dict = Depends(require_us
                   owner=owner["username"] if owner else None, busy=jobs.is_locked(f"vm:{name}"),
                   all_users=[{"id": u["id"], "username": u["username"]} for u in users.all_users()]
                   if is_admin(user) else [],
-                  can_resize=(get_settings().vms_dir / name / "terraform.tfstate").exists())
+                  can_resize=(get_settings().vms_dir / name / "terraform.tfstate").exists(),
+                  state_history=[p.name for p in reversed(provision.state_history_files(provision.vm_dir(name)))]
+                  if is_admin(user) else [])
 
 
 @app.post("/vms/{name}/power/{action}")
@@ -489,7 +505,7 @@ async def job_stream(job_id: int, user: dict = Depends(require_user)):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-from . import admin, console, editor, routes_images  # noqa: E402 - feature routers
+from . import admin, console, editor, routes_backup, routes_images  # noqa: E402 - feature routers
 
-for _r in (admin.router, console.router, routes_images.router, editor.router):
+for _r in (admin.router, console.router, routes_images.router, editor.router, routes_backup.router):
     app.include_router(_r)

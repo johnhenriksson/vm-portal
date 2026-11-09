@@ -1,0 +1,312 @@
+"""Validation of what comes out of a backup, before any of it is used.
+
+A backup is only as trustworthy as whoever could write it: anyone with the passphrase,
+or anyone at all for a file encrypted to a public key. So nothing is taken on trust.
+Terraform state could otherwise point the portal at any VM in vCenter (and a later
+"destroy" would delete it), and database rows could carry anything the UI would never
+accept. Everything here is checked against the same rules the UI applies.
+"""
+import ipaddress
+import json
+import re
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from ..config import CONTROL_RE, LINUX_USER_RE
+from .archive import BackupError
+
+NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")   # provision.NAME_RE
+IMAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,47}$")    # images.ID_RE
+MOID_RE = re.compile(r"^vm-[0-9]{1,12}$")
+MAX_STATE = 16 * 1024 * 1024
+
+# What the portal's own module (terraform/vm) puts in state, and nothing else.
+STATE_MANAGED = ("vsphere_virtual_machine", "this")
+STATE_DATA = {("vsphere_datacenter", "this"), ("vsphere_compute_cluster", "this"), ("vsphere_datastore", "this"),
+              ("vsphere_network", "this"), ("vsphere_virtual_machine", "template")}
+PROVIDERS = {'provider["registry.opentofu.org/vmware/vsphere"]',
+             'provider["registry.terraform.io/vmware/vsphere"]'}
+# Variables the portal writes (terraform/vm/variables.tf). Connection settings are dropped:
+# they always come from the current settings.
+TFVARS_STRINGS = {"datacenter", "cluster", "datastore", "network", "folder", "template", "name",
+                  "metadata", "userdata", "annotation"}
+TFVARS_INTS = {"cpus": (1, 32), "memory_mb": (512, 262144), "disk_gb": (1, 65536)}
+TFVARS_FACTS = {"guest_id", "scsi_type", "firmware", "adapter_type", "uuid"}
+CONNECTION_VARS = {"vsphere_server", "vsphere_user", "vsphere_insecure", "vsphere_password"}
+
+
+def check_state(name: str, data: bytes) -> str:
+    """Validate a VM's OpenTofu state; returns the VM's vCenter id (moid)."""
+    if len(data) > MAX_STATE:
+        raise BackupError(f"{name}: the state file is too large")
+    try:
+        state = json.loads(data)
+    except ValueError:
+        raise BackupError(f"{name}: the state file is not valid JSON") from None
+    if not isinstance(state, dict) or state.get("version") != 4 or not isinstance(state.get("resources"), list):
+        raise BackupError(f"{name}: not an OpenTofu/Terraform state file (version 4)")
+    moid = None
+    for r in state["resources"]:
+        if not isinstance(r, dict) or "module" in r:
+            raise BackupError(f"{name}: the state has resources the portal didn't create")
+        key, mode = (r.get("type"), r.get("name")), r.get("mode")
+        if r.get("provider") not in PROVIDERS:
+            raise BackupError(f"{name}: the state uses an unexpected provider")
+        instances = r.get("instances")
+        if not isinstance(instances, list) or len(instances) > 1:
+            raise BackupError(f"{name}: unexpected instances in the state")
+        if mode == "data" and key in STATE_DATA:
+            continue
+        if mode != "managed" or key != STATE_MANAGED or moid is not None:
+            raise BackupError(f"{name}: the state has resources the portal didn't create ({r.get('type')}.{r.get('name')})")
+        attrs = (instances[0] if instances else {}).get("attributes") if instances else None
+        if not isinstance(attrs, dict):
+            raise BackupError(f"{name}: the state has no VM in it")
+        if attrs.get("name") != name:
+            raise BackupError(f"{name}: the state describes a VM named {str(attrs.get('name'))[:40]!r}")
+        moid = attrs.get("moid")
+        if not isinstance(moid, str) or not MOID_RE.match(moid):
+            raise BackupError(f"{name}: the state has no valid vCenter id for the VM")
+    if moid is None:
+        raise BackupError(f"{name}: the state has no VM in it")
+    return moid
+
+
+def check_tfvars(name: str, data: bytes) -> dict:
+    """Validate a VM's variables; returns them without connection settings."""
+    try:
+        tfvars = json.loads(data)
+    except ValueError:
+        raise BackupError(f"{name}: the variables file is not valid JSON") from None
+    if not isinstance(tfvars, dict):
+        raise BackupError(f"{name}: the variables file is not an object")
+    out = {}
+    for k, v in tfvars.items():
+        if k in CONNECTION_VARS:
+            continue
+        if k in TFVARS_STRINGS:
+            ok = isinstance(v, str) and len(v) <= 256 * 1024
+        elif k in TFVARS_INTS:
+            lo, hi = TFVARS_INTS[k]
+            ok = isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+        elif k == "template_facts":
+            ok = (isinstance(v, dict) and set(v) <= TFVARS_FACTS
+                  and all(isinstance(x, str) and len(x) <= 256 and not CONTROL_RE.search(x) for x in v.values()))
+        else:
+            ok = False
+        if not ok:
+            raise BackupError(f"{name}: unexpected variable {k[:40]!r} in the variables file")
+        if k not in ("metadata", "userdata") and isinstance(v, str) and CONTROL_RE.search(v):
+            raise BackupError(f"{name}: variable {k} contains control characters")
+        out[k] = v
+    if out.get("name") != name:
+        raise BackupError(f"{name}: the variables file is for another VM")
+    return out
+
+
+# --- database rows ---------------------------------------------------------------------
+
+def _text(v: str | None, limit: int = 255) -> str | None:
+    if v is not None and (CONTROL_RE.search(v) or len(v) > limit):
+        raise ValueError("invalid text")
+    return v
+
+
+def _timestamp(v: str | None) -> str | None:
+    if v is not None:
+        datetime.fromisoformat(v)
+    return v
+
+
+class _Row(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class VmRow(_Row):
+    id: int | None = None
+    name: str
+    status: Literal["provisioning", "ready", "failed", "destroying", "destroyed"]
+    template: str = Field(max_length=255)
+    cpus: int = Field(ge=1, le=32)
+    memory_mb: int = Field(ge=512, le=262144)
+    disk_gb: int = Field(ge=1, le=65536)
+    ip_mode: Literal["dhcp", "static"]
+    ip: str | None = None
+    has_compose: int = Field(ge=0, le=1)
+    created_at: str
+    last_job_id: int | None = None
+    owner_id: int | None = None
+    console_login: int = Field(0, ge=0, le=1)
+    vm_user: str | None = None
+    image_id: str | None = None
+    notes: str = Field("", max_length=2000)
+    owner_username: str | None = None   # only in VM backups: ids mean nothing on another portal
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        if not NAME_RE.match(v):
+            raise ValueError("invalid VM name")
+        return v
+
+    @field_validator("template")
+    @classmethod
+    def _template(cls, v):
+        return _text(v)
+
+    @field_validator("ip")
+    @classmethod
+    def _ip(cls, v):
+        return str(ipaddress.IPv4Address(v)) if v is not None else v
+
+    @field_validator("created_at")
+    @classmethod
+    def _ts(cls, v):
+        return _timestamp(v)
+
+    @field_validator("vm_user")
+    @classmethod
+    def _user(cls, v):
+        if v is not None and (not LINUX_USER_RE.match(v) or v == "root"):
+            raise ValueError("invalid login user")
+        return v
+
+    @field_validator("image_id")
+    @classmethod
+    def _image(cls, v):
+        if v is not None and not IMAGE_ID_RE.match(v):
+            raise ValueError("invalid image id")
+        return v
+
+    @field_validator("notes")
+    @classmethod
+    def _notes(cls, v):
+        if any(ord(c) < 32 and c not in "\n\t" for c in v):
+            raise ValueError("control characters in notes")
+        return v
+
+    @field_validator("owner_username")
+    @classmethod
+    def _owner(cls, v):
+        return _text(v, 64)
+
+
+def rows(model: type[BaseModel], data, what: str) -> list:
+    if not isinstance(data, list):
+        raise BackupError(f"{what}: expected a list of rows")
+    out = []
+    for i, r in enumerate(data):
+        try:
+            out.append(model.model_validate(r))
+        except ValidationError as e:
+            err = e.errors()[0]
+            raise BackupError(f"{what}, row {i + 1}: {'.'.join(map(str, err['loc']))}: {err['msg']}") from None
+    return out
+
+
+SCRYPT_RE = re.compile(r"^scrypt\$[0-9]{1,7}\$[0-9]{1,2}\$[0-9]{1,2}\$[A-Za-z0-9+/=]{4,100}\$[A-Za-z0-9+/=]{4,100}$")
+KIND_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+class UserRow(_Row):
+    id: int = Field(ge=1)
+    username: str
+    password_hash: str
+    role: Literal["admin", "user"]
+    disabled: int = Field(ge=0, le=1)
+    session_version: int = Field(ge=0)
+    created_at: str
+    last_login_at: str | None = None
+
+    @field_validator("username")
+    @classmethod
+    def _username(cls, v):
+        from .. import users
+        if users.validate_username(v) != v:
+            raise ValueError("invalid username")
+        return v
+
+    @field_validator("password_hash")
+    @classmethod
+    def _hash(cls, v):
+        if not SCRYPT_RE.match(v):
+            raise ValueError("not a password hash this portal makes")
+        return v
+
+    @field_validator("created_at", "last_login_at")
+    @classmethod
+    def _ts(cls, v):
+        return _timestamp(v)
+
+
+class JobRow(_Row):
+    id: int = Field(ge=1)
+    kind: str
+    target: str = Field(max_length=255)
+    status: Literal["queued", "running", "succeeded", "failed"]
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    exit_code: int | None = None
+    user_id: int | None = None
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v):
+        if not KIND_RE.match(v):
+            raise ValueError("invalid job kind")
+        return v
+
+    @field_validator("target")
+    @classmethod
+    def _target(cls, v):
+        return _text(v)
+
+    @field_validator("created_at", "started_at", "finished_at")
+    @classmethod
+    def _ts(cls, v):
+        return _timestamp(v)
+
+
+class AuditRow(_Row):
+    id: int = Field(ge=1)
+    ts: str
+    username: str | None = Field(None, max_length=64)
+    ip: str | None = Field(None, max_length=64)
+    action: str
+    detail: str | None = Field(None, max_length=1000)
+
+    @field_validator("action")
+    @classmethod
+    def _action(cls, v):
+        if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", v):
+            raise ValueError("invalid action")
+        return v
+
+    @field_validator("ts")
+    @classmethod
+    def _ts(cls, v):
+        return _timestamp(v)
+
+
+class ImageSettingRow(_Row):
+    image_id: str
+    data: str = Field(max_length=64 * 1024)
+    updated_at: str
+    updated_by: str | None = Field(None, max_length=64)
+
+    @field_validator("image_id")
+    @classmethod
+    def _image(cls, v):
+        if not IMAGE_ID_RE.match(v):
+            raise ValueError("invalid image id")
+        return v
+
+    @field_validator("data")
+    @classmethod
+    def _data(cls, v):
+        if not isinstance(json.loads(v), dict):
+            raise ValueError("image settings must be an object")
+        return v

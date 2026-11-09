@@ -35,6 +35,28 @@
       {% if not is_https %}<br>You're using the portal over plain HTTP right now. Put it behind a reverse proxy with
       HTTPS, open it through that, then turn this on.{% endif %}</p>
     {% for f in fields %}{{ field(f) }}{% endfor %}
+  {% elif section == "backup" %}
+    <h2 style="font-size:1.1rem;margin:0 0 .5rem">Scheduled backups</h2>
+    <p class="muted">Full backups written to <code>{{ backup_dir }}</code> (<code>BACKUP_DIR</code>), encrypted to
+      age public keys. Make a key pair with <code>age-keygen</code> (or <code>python -m app.backup keygen</code>) on
+      another machine and paste only the public key here: the portal can then write backups but never read them.
+      Keep the secret key somewhere safe and offline; without it the backups can't be restored.</p>
+    {% if backup_dir_error %}<div class="alert warn">{{ backup_dir_error }}</div>{% endif %}
+    {% set h = backup_health %}
+    <p>Status:
+      {% if h.state == "off" %}<span class="badge plain">Off</span>
+      {% elif h.state == "ok" %}<span class="badge ready plain">OK</span>
+      {% elif h.state == "pending" %}<span class="badge queued plain">Waiting for the first run</span>
+      {% else %}<span class="badge failed plain">{{ "Failing" if h.state == "failing" else "Behind" }}</span>{% endif %}
+      {% if backup_status.last_success %} · last good backup {{ backup_status.last_success[:16] | replace("T", " ") }} UTC
+        (<code>{{ backup_status.last_file }}</code>){% endif %}
+      {% if backup_next and h.state != "off" %} · next {{ backup_next.strftime("%Y-%m-%d %H:%M") }} UTC{% endif %}
+      {% if backup_running %} · <span aria-busy="true"></span> running now{% endif %}</p>
+    {% if h.error %}<div class="alert">Last attempt failed: {{ h.error }}</div>{% endif %}
+    {{ field(fields[0]) }}
+    <div class="grid-2">{{ field(fields[1]) }}{{ field(fields[2]) }}</div>
+    {{ field(fields[3]) }}
+    {{ field(fields[4]) }}
   {% elif section == "network" %}
     <p class="muted">Static IPs are offered from this pool. Leave the pool empty to only allow DHCP.</p>
     <div class="grid-2">{% for f in fields[:-1] %}{{ field(f) }}{% endfor %}</div>
@@ -214,6 +236,86 @@
       <p>Tools: {% for t, ok in system.tools.items() %}<code>{{ t }}</code> {{ "✓" if ok else "missing" }}{{ " · " if not loop.last }}{% endfor %}</p>
     </div>
   </div>
+</div>
+{% endif %}
+
+{% if section == "backup" %}
+{% if has_recipients %}
+<form method="post" action="/settings/backup/run-now" style="margin-top:.75rem">{{ csrf_field(request) }}
+  <button class="btn-outline btn-sm" {% if backup_running or backup_dir_error %}disabled{% endif %}>Back up now</button></form>
+{% endif %}
+
+<div class="grid-2" style="margin-top:2rem;align-items:start">
+<form method="post" action="/settings/backup/download" class="card">
+  <div class="card-head">Download a backup</div>
+  <div class="card-body">
+    {{ csrf_field(request) }}
+    <label class="check-field"><input type="radio" name="what" value="full" {% if not preselect %}checked{% endif %}>
+      <span><span class="label">Everything</span><span class="hint">Users, settings, VMs and their state, custom images: what you need to rebuild the portal or move it.</span></span></label>
+    <label class="check-field"><input type="radio" name="what" value="vms" {% if preselect %}checked{% endif %} {% if not backup_vms %}disabled{% endif %}>
+      <span><span class="label">Only the OpenTofu state of these VMs</span><span class="hint">To recover them, or move them to another portal.</span></span></label>
+    <div class="check-list">
+    {% for v in backup_vms %}
+      <label class="check-field small"><input type="checkbox" name="vms" value="{{ v.name }}" {% if v.name in preselect %}checked{% endif %}>
+        <span class="mono">{{ v.name }}</span></label>
+    {% else %}<p class="muted small">No VM has OpenTofu state yet.</p>{% endfor %}
+    </div>
+    <label class="check-field"><input type="checkbox" name="include_logs">
+      <span><span class="label">Include job logs</span><span class="hint">Full backups only. Logs can be large.</span></span></label>
+    <hr>
+    <label class="check-field"><input type="radio" name="encrypt" value="passphrase" checked>
+      <span><span class="label">Encrypt with a passphrase</span></span></label>
+    <label class="field"><span class="label">Passphrase</span>
+      <input name="passphrase" value="{{ suggested_passphrase }}" class="mono" minlength="16" maxlength="1024" autocomplete="off" spellcheck="false">
+      <span class="hint">At least 16 characters. A random one is suggested: copy it somewhere safe first. Without it the
+        backup can't be opened, and anyone who has it can read the backup.</span></label>
+    {% if has_recipients %}
+    <label class="check-field"><input type="radio" name="encrypt" value="keys">
+      <span><span class="label">Encrypt to the scheduled-backup public keys</span><span class="hint">Restoring then needs one of their secret keys.</span></span></label>
+    {% endif %}
+    <label class="field"><span class="label">Your password</span>
+      <input type="password" name="confirm" required maxlength="256" autocomplete="current-password"></label>
+    <button type="submit">Download</button>
+  </div>
+</form>
+
+<div>
+<form method="post" action="/settings/backup/open" enctype="multipart/form-data" class="card">
+  <div class="card-head">Restore or import</div>
+  <div class="card-body">
+    {{ csrf_field(request) }}
+    <p class="muted">Open a backup to see what's in it. Nothing changes until you confirm on the next page:
+      either restore everything, or import some of its VMs into this portal.</p>
+    <label class="field"><span class="label">Backup file</span>
+      <input type="file" name="file" accept=".vmpbak" required>
+      <span class="hint">Up to {{ max_mb }} MB (<code>BACKUP_MAX_MB</code>).</span></label>
+    <label class="field"><span class="label">Passphrase or age secret key</span>
+      <input type="password" name="secret" required maxlength="1024" autocomplete="off">
+      <span class="hint">The secret key starts with AGE-SECRET-KEY-1. It's only used to open this file and isn't stored.</span></label>
+    <label class="field"><span class="label">Your password</span>
+      <input type="password" name="confirm" required maxlength="256" autocomplete="current-password"></label>
+    <button type="submit">Open backup</button>
+    {% if pre_restore %}<p class="muted small" style="margin-top:1rem">The data from before the last restore is kept in the data volume
+      (<code>.pre-restore</code>). To go back to it, stop the portal and run <code>python -m app.backup undo-restore</code>.</p>{% endif %}
+  </div>
+</form>
+
+<form method="post" action="/settings/backup/check-vms" class="card" style="margin-top:1.5rem">
+  <div class="card-head">Check VMs against vCenter</div>
+  <div class="card-body">
+    {{ csrf_field(request) }}
+    <p class="muted">After a restore or a move: does each VM's recorded id still belong to that VM, in this portal's
+      datacenter and folder?</p>
+    {% if vm_check is defined %}
+      {% set bad = vm_check | selectattr("problems") | list %}
+      {% if not vm_check %}<p class="muted">No VMs.</p>
+      {% elif not bad %}<div class="alert ok">All {{ vm_check | length }} VM(s) match vCenter.</div>
+      {% else %}<div class="alert warn"><ul>{% for v in bad %}<li><strong>{{ v.name }}</strong>: {{ v.problems | join("; ") }}</li>{% endfor %}</ul></div>{% endif %}
+    {% endif %}
+    <button class="btn-outline">Check now</button>
+  </div>
+</form>
+</div>
 </div>
 {% endif %}
 

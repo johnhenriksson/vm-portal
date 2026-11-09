@@ -19,6 +19,9 @@ same web interface. Runs as a single container.
 - **Users**: admins and regular users; users only see their own VMs and jobs
 - **Settings in the UI**: vCenter connection with resource pickers, IP pool,
   default SSH keys; secrets encrypted at rest
+- **Backups**: encrypted full backups (download, schedule, or command line) to
+  rebuild the portal or move it to another host, and per-VM state exports;
+  restore in the browser, during first-run setup or from the command line
 - **Audit log** and every OpenTofu/Packer run kept with its full log
 
 ## How it works
@@ -87,11 +90,33 @@ needed before the database can be opened. Optional environment variables (`.env`
 | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Create the first admin without the setup token |
 | `PACKER_SSH_KEY` | Use your own build key instead of the generated one |
 | `FORWARDED_ALLOW_IPS` | Reverse proxies trusted for `X-Forwarded-*` (default `127.0.0.1`) |
+| `BACKUP_DIR` | Where scheduled backups go (default `/backups`; mount another disk there) |
+| `BACKUP_MAX_MB` | Largest backup the portal writes, uploads or restores (default 512) |
 | Any setting, e.g. `VSPHERE_SERVER` | Overrides the UI; shown read-only there. Use it to pin security switches such as `ALLOW_IMAGE_EDITING=false` or `HTTPS_ONLY_COOKIES=true` |
 
 The data volume (`portal-data`) holds the database, keys, OpenTofu state and
-logs. **Back it up**, and treat backups as secret: the state is how the portal
-knows what to destroy, and the encryption key unlocks stored credentials.
+logs. The OpenTofu state is how the portal knows which VM in vCenter is which,
+so **set up backups** before you rely on the portal.
+
+## Backup and restore
+
+**Settings → Backup** makes encrypted backups, with a passphrase or to
+[age](https://age-encryption.org) public keys:
+
+- **Full backup**: users, settings, every VM's record and OpenTofu state, custom
+  image definitions, jobs and the audit log. Restore it to recover a lost data
+  volume or to move the portal to another host. It also works from the first-run
+  page of a fresh portal, or from the command line.
+- **VM backup**: chosen VMs' OpenTofu state, to recover them or move them to
+  another portal. Each VM also keeps its last five states for rollback.
+- **Scheduled backups** to `/backups`, encrypted to public keys whose secret keys
+  stay offline, so the portal can write backups but never read them.
+
+Nothing in a backup is trusted on restore. Everything is checked with the UI's
+own rules, and an imported VM's id must match that very VM in vCenter. The
+restore builds the new data next to the old, swaps it in, and keeps the
+previous data so it can be undone. See [`docs/backup.md`](docs/backup.md) for
+the setup, recovery and migration steps, and what is and isn't included.
 
 ## Users and security
 
@@ -154,7 +179,8 @@ Provisioning and builds also need `tofu` (or `terraform`), `packer` and
 `xorriso` on the PATH. Layout:
 
 ```
-app/            FastAPI app (routes, vSphere, jobs, guests/, templates/, static/)
+app/            FastAPI app (routes, vSphere, jobs, backup/, guests/, templates/, static/)
+docs/           backup and restore guide
 images/         built-in image definitions (Packer + image.yaml)
 terraform/vm/   the OpenTofu module that clones a VM
 build/keys/     release signing keys the Dockerfile verifies tools with

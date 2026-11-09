@@ -132,6 +132,33 @@
   {% include "_jobs_table.html" %}
 </div>
 
+{% if current_user.role == "admin" and can_resize %}
+<div class="card" style="margin:2rem 0 1.5rem">
+  <div class="card-head">OpenTofu state</div>
+  <div class="card-body">
+    <p class="muted">The portal manages this VM through its OpenTofu state. <a href="/settings/backup?vm={{ vm.name }}">Export it</a>
+      to back it up or move the VM to another portal.</p>
+    {% if state_history %}
+    <p class="muted">Copies kept before each resize or destroy. Roll back only if the current state is damaged:
+      the VM in vCenter isn't changed, only what the portal knows about it.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Saved (UTC)</th><th></th></tr></thead>
+      <tbody>
+      {% for v in state_history %}
+        <tr><td class="mono">{{ v[0:4] }}-{{ v[4:6] }}-{{ v[6:8] }} {{ v[9:11] }}:{{ v[11:13] }}:{{ v[13:15] }}</td>
+          <td><form method="post" action="/vms/{{ vm.name }}/state-history/{{ v }}/restore" class="row"
+                    data-confirm="Replace {{ vm.name }}'s current state with this copy? The current one is kept.">
+            {{ csrf_field(request) }}
+            <input type="password" name="confirm" placeholder="Your password" autocomplete="current-password" maxlength="256" required>
+            <button class="btn-outline btn-sm">Roll back</button></form></td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {% if not busy %}
 <div class="section card danger-zone" id="destroy">
   <div class="card-head">Destroy</div>

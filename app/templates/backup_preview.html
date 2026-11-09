@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Backup · VM Portal{% endblock %}
+
+{% macro preview() %}
+{% set m = p.backup.manifest %}
+<p class="muted">Opened <code>{{ p.filename }}</code>. Nothing has changed yet. This page expires in 15 minutes.</p>
+{% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+<dl class="backup-summary">
+  <dt>Kind</dt><dd>{{ "Full backup" if p.backup.kind == "full" else "VM state" }}</dd>
+  <dt>Made</dt><dd>{{ (m.created_at or "?")[:19] | replace("T", " ") }} UTC by {{ m.created_by or "?" }}</dd>
+  <dt>From installation</dt><dd class="mono">{{ (m.installation_id or "?")[:8] }}</dd>
+  <dt>Encrypted</dt><dd>{{ "with a passphrase" if p.passphrase else "to public keys" }}</dd>
+  {% if p.full %}{% set sm = p.full.summary %}
+  <dt>Contains</dt><dd>{{ sm.users }} users ({{ sm.admins }} active admins), {{ sm.vms }} VMs, {{ sm.images }} custom images,
+    {{ sm.jobs }} jobs{% if sm.logs %} with {{ sm.logs }} logs{% endif %}</dd>
+  {% endif %}
+</dl>
+
+{% if p.backup.kind == "full" %}
+<div class="card" style="margin-bottom:1.5rem">
+  <div class="card-head">Restore everything</div>
+  <div class="card-body">
+  {% if p.full %}
+    <p>Replaces this portal's users, settings, VMs, custom images, jobs and audit log with the backup's.
+      The current data is kept in the data volume (<code>.pre-restore</code>) until the next restore.</p>
+    <div class="alert warn"><ul>{% for w in p.full.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div>
+    <form method="post" action="{{ '/setup/restore/confirm' if setup else '/settings/backup/restore' }}" class="row" style="align-items:flex-end">
+      {{ csrf_field(request) }}<input type="hidden" name="token" value="{{ p.token }}">
+      <label class="field" style="margin:0"><span class="label">Type RESTORE to confirm</span>
+        <input name="typed" required autocomplete="off" spellcheck="false" class="mono"></label>
+      <button class="btn-danger">Restore this backup</button>
+    </form>
+  {% else %}
+    <div class="alert" role="alert">This backup can't be restored: {{ p.full_error }}</div>
+  {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if not setup %}
+<div class="card">
+  <div class="card-head">Import VMs</div>
+  <div class="card-body">
+  {% if p.vm_imports %}
+    <p class="muted">Adds the VMs to this portal, or replaces the state of ones it already has (the current state is kept
+      in the VM's history). Each VM was checked in vCenter: its id must belong to that VM, in this portal's datacenter
+      and folder, and vm-portal must have created it.</p>
+    <form method="post" action="/settings/backup/import-vms">
+      {{ csrf_field(request) }}<input type="hidden" name="token" value="{{ p.token }}">
+      <div class="table-wrap"><table>
+        <thead><tr><th></th><th>VM</th><th>vCenter id</th><th>Owner in the backup</th><th>Check</th></tr></thead>
+        <tbody>
+        {% for i in p.vm_imports %}
+          <tr>
+            <td>{% if i.ok %}<input type="checkbox" name="names" value="{{ i.name }}" aria-label="Import {{ i.name }}">{% endif %}</td>
+            <td class="mono">{{ i.name }}</td>
+            <td class="mono muted">{{ i.moid or "–" }}</td>
+            <td>{{ i.owner or "–" }}</td>
+            <td>{% if i.ok %}<span class="badge ready plain">{{ "Replace state" if i.replace else "Ready" }}</span>
+                {% for n in i.notes %}<div class="hint">{{ n }}</div>{% endfor %}
+              {% else %}<span class="error">{{ i.problems | join("; ") }}</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      {% if p.vm_imports | selectattr("ok") | list %}<button type="submit" style="margin-top:1rem">Import the chosen VMs</button>{% endif %}
+    </form>
+  {% else %}
+    <p class="muted">{{ p.full_error if p.full_error and p.backup.kind == "vms" else "The backup has no VMs with OpenTofu state." }}</p>
+  {% endif %}
+  </div>
+</div>
+<form method="post" action="/settings/backup/discard" style="margin-top:1rem">{{ csrf_field(request) }}
+  <button class="btn-outline btn-sm">Close the backup</button></form>
+{% endif %}
+{% endmacro %}
+
+{% block content %}
+<div class="page-head"><div><h1>Backup</h1></div></div>
+{{ preview() }}
+{% endblock %}
+
+{% block public %}
+<div class="login-wrap">
+  <div class="login-card" style="max-width:640px">
+    <h1 style="font-size:1.5rem">Restore a backup</h1>
+    {{ preview() }}
+  </div>
+</div>
+{% endblock %}

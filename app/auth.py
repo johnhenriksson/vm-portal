@@ -4,7 +4,9 @@ The session cookie (signed, not encrypted) holds only the user id, the user's
 session_version, a random session id and a CSRF token. The user is re-read on
 every request, so disabling a user or changing their password ends their other
 sessions; logging out revokes that one session id on the server, so a copy of
-the cookie stops working too.
+the cookie stops working too. A full restore starts a new session epoch, which ends
+every session from before it (user ids in the restored database may now belong to
+someone else), even when SECRET_KEY comes from the environment.
 """
 import hmac
 import secrets
@@ -27,9 +29,27 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+_epoch: str | None = None
+
+
+def session_epoch() -> str:
+    global _epoch
+    if _epoch is None:
+        _epoch = db.get_meta("session_epoch", "")
+    return _epoch
+
+
+def reset_session_epoch() -> None:
+    """Forget the cached epoch (after a restore wrote a new one)."""
+    global _epoch
+    _epoch = None
+
+
 def session_user(session: dict) -> dict | None:
     """The session's user if it still exists, is enabled and the session wasn't revoked."""
     uid, sv, sid = session.get("uid"), session.get("sv"), session.get("sid")
+    if session.get("ep", "") != session_epoch():
+        return None
     u = users.get(uid) if isinstance(uid, int) else None
     if u and (u["disabled"] or u["session_version"] != sv):
         u = None
@@ -43,7 +63,7 @@ def current_user(request: HTTPConnection) -> dict | None:
         return request.state.user
     u = session_user(request.session)
     if u is None and request.session.get("uid") is not None:
-        for k in ("uid", "sv", "sid"):
+        for k in ("uid", "sv", "sid", "ep"):
             request.session.pop(k, None)
     elif u is not None and "sid" not in request.session:
         request.session["sid"] = secrets.token_urlsafe(16)  # cookie from before session ids
@@ -75,7 +95,7 @@ def require_admin(user: dict = Depends(require_user)) -> dict:
 def start_session(request: Request, user: dict) -> None:
     request.session.clear()
     request.session.update({"uid": user["id"], "sv": user["session_version"], "sid": secrets.token_urlsafe(16),
-                            "csrf": secrets.token_urlsafe(32)})
+                            "ep": session_epoch(), "csrf": secrets.token_urlsafe(32)})
     request.state.user = user
 
 
@@ -90,6 +110,20 @@ def csrf_field(request: Request) -> Markup:
     return Markup('<input type="hidden" name="csrf_token" value="{}">').format(csrf_token(request))
 
 
+def check_upload_size(request: HTTPConnection) -> None:
+    """File uploads (backups) are spooled to disk while the form is parsed, before any route
+    runs: refuse ones without a declared size or larger than BACKUP_MAX_MB up front."""
+    if not request.headers.get("content-type", "").startswith("multipart/"):
+        return
+    from .config import get_bootstrap
+    limit = get_bootstrap().backup_max_mb * 1024 * 1024 + 64 * 1024
+    length = request.headers.get("content-length", "")
+    if not length.isdigit():
+        raise HTTPException(411, "Uploads need a Content-Length")
+    if int(length) > limit:
+        raise HTTPException(413, f"The file is larger than the limit ({get_bootstrap().backup_max_mb} MB, BACKUP_MAX_MB)")
+
+
 async def csrf_protect(request: HTTPConnection) -> None:
     """App-wide dependency: every state-changing request must carry the session's CSRF token.
 
@@ -97,6 +131,7 @@ async def csrf_protect(request: HTTPConnection) -> None:
     """
     if request.scope["type"] != "http" or request.method in SAFE_METHODS:
         return
+    check_upload_size(request)
     sent = request.headers.get("X-CSRF-Token")
     if not sent:
         form = await request.form()  # cached by Starlette; route Form() params still work

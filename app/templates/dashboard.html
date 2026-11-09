@@ -17,6 +17,12 @@
   {% if current_user.role == "admin" %}<a href="/setup/vcenter">Run the setup wizard</a>.{% else %}Ask an admin to configure it.{% endif %}</div>
 {% endif %}
 
+{% if backup_health and backup_health.state in ("failing", "late") %}
+<div class="alert warn">Scheduled backups are {{ "failing" if backup_health.state == "failing" else "behind" }}{% if backup_health.error %}: {{ backup_health.error }}{% endif %}.
+  {% if backup_health.last_success %}The last good one is from {{ backup_health.last_success.strftime("%Y-%m-%d %H:%M") }} UTC.{% else %}None has succeeded yet.{% endif %}
+  <a href="/settings/backup">Check the backup settings</a>.</div>
+{% endif %}
+
 {% with error=None %}{% include "_vm_table.html" %}{% endwith %}
 
 <div class="section">
