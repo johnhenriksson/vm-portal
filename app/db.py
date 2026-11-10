@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS vms (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
-    status      TEXT NOT NULL,            -- provisioning, ready, failed, destroying, destroyed
+    status      TEXT NOT NULL,            -- provisioning, ready, failed, destroying, destroyed, forgotten
     template    TEXT NOT NULL,
     cpus        INTEGER NOT NULL,
     memory_mb   INTEGER NOT NULL,
@@ -195,16 +195,20 @@ def fail_interrupted_jobs() -> None:
 
 # --- vms --------------------------------------------------------------------
 
+# A destroyed VM is gone from vCenter; a forgotten one still exists there but this portal
+# no longer manages it (it was moved to another portal). Neither counts as a VM here.
+GONE = ("destroyed", "forgotten")
+
 def active_vm(name: str) -> dict | None:
-    return one("SELECT * FROM vms WHERE name=? AND status != 'destroyed'", (name,))
+    return one("SELECT * FROM vms WHERE name=? AND status NOT IN ('destroyed', 'forgotten')", (name,))
 
 
 def active_vms() -> list[dict]:
-    return query("SELECT * FROM vms WHERE status != 'destroyed' ORDER BY name")
+    return query("SELECT * FROM vms WHERE status NOT IN ('destroyed', 'forgotten') ORDER BY name")
 
 
 def reserved_ips() -> set[str]:
-    rows = query("SELECT ip FROM vms WHERE status != 'destroyed' AND ip IS NOT NULL")
+    rows = query("SELECT ip FROM vms WHERE status NOT IN ('destroyed', 'forgotten') AND ip IS NOT NULL")
     return {r["ip"] for r in rows}
 
 

@@ -108,7 +108,9 @@ so **set up backups** before you rely on the portal.
   volume or to move the portal to another host. It also works from the first-run
   page of a fresh portal, or from the command line.
 - **VM backup**: chosen VMs' OpenTofu state, to recover them or move them to
-  another portal. Each VM also keeps its last five states for rollback.
+  another portal. Each VM also keeps its last five states for rollback. After a
+  move, **Forget** on the VM's page makes the old portal let go of it without
+  touching it in vCenter.
 - **Scheduled backups** to `/backups`, encrypted to public keys whose secret keys
   stay offline, so the portal can write backups but never read them.
 

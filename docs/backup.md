@@ -27,7 +27,7 @@ unencrypted one.
 | The vCenter password stored in the portal (inside the encryption) | Anything set in the environment (`.env`, `compose.yaml`), such as `VSPHERE_PASSWORD`: set it again on the new host |
 | Each VM's record, OpenTofu state and variables | The Packer build key: a new one is generated |
 | Custom image definitions (current version) | Their edit history, built-in images (they come with the portal), OpenTofu provider caches, saved plans |
-| Jobs and the audit log; job logs if you ask for them | Destroyed VMs' archived files |
+| Jobs and the audit log; job logs if you ask for them | Destroyed and forgotten VMs' archived files |
 
 A backup is a `.vmpbak` file: a gzip-compressed tar archive with a
 `manifest.json` that lists every file with its SHA-256 checksum, encrypted
@@ -193,10 +193,17 @@ Running `undo-restore` again switches back to the restored data.
    managing the same VMs undo each other's changes. The restore preview warns
    when a backup comes from another installation.
 
-To move only some VMs, download a VM backup on the old portal and import it on
-the new one. The old portal still lists them afterwards, and there's no button
-yet to make it forget a VM without destroying it. So never resize or destroy
-moved VMs there; ideally, stop using the old portal altogether.
+To move only some VMs:
+
+1. On the old portal, download a VM backup of them.
+2. Import it on the new portal and check the VMs there.
+3. On the old portal, open each moved VM and use **Forget** at the bottom of its
+   page (admins only: type the VM's name and your password). The portal stops
+   managing the VM and leaves it running in vCenter, unchanged. Don't use
+   **Destroy** for this: that deletes the VM from vCenter.
+
+A forgotten VM's OpenTofu files are kept in `/data/forgotten/<name>-<id>` on
+the old portal. Forgotten one by mistake? Import it back from a backup.
 
 ### What's checked when VMs are imported
 
@@ -220,7 +227,7 @@ importing admin.
   backups use X25519. Both are authenticated: a changed file doesn't decrypt.
   The manifest's checksums then catch anything added, dropped or swapped inside.
 - **Admins only, with their password.** Downloading, opening, restoring,
-  importing and rolling back state all need the acting admin's password (with
+  importing, rolling back state and forgetting a VM all need the acting admin's password (with
   the same throttling as other password checks) and are written to the audit
   log, without any secrets.
 - **Nothing is trusted.** An opened backup is read entirely in memory:

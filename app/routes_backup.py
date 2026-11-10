@@ -292,6 +292,36 @@ async def state_history_restore(request: Request, name: str, version: str, user:
     return RedirectResponse(f"/vms/{name}", status_code=303)
 
 
+@router.post("/vms/{name}/forget")
+async def vm_forget(request: Request, name: str, user: dict = Depends(require_admin),
+                    typed: str = Form(""), confirm: str = Form("")):
+    """Remove a VM from this portal and leave it running in vCenter: after moving it to
+    another portal, so two portals never manage the same VM."""
+    vm = db.active_vm(name)
+    if not vm:
+        raise HTTPException(404, f"No VM named {name!r}")
+    if typed != name:
+        raise HTTPException(400, "Type the VM name to confirm")
+    try:
+        await asyncio.to_thread(confirm_password, request, user, confirm, f"vm.forget {name}",
+                                "Enter your password to forget the VM")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    lock = jobs.lock_for(f"vm:{name}")
+    if lock.locked():
+        raise HTTPException(409, "A job is running for this VM")
+    async with lock:   # no job can start for the VM while its files move
+        vm = db.active_vm(name)
+        if not vm:
+            raise HTTPException(404, f"No VM named {name!r}")
+        try:
+            kept = await asyncio.to_thread(provision.forget, vm)
+        except (OSError, ValueError) as e:
+            raise HTTPException(500, f"Couldn't forget {name}: {e}") from None
+    audit(request, user, "vm.forgotten", f"{name} ({vm['id']}); files kept in {kept.name if kept else '-'}")
+    return RedirectResponse("/?forgotten=" + name, status_code=303)
+
+
 # --- first-run setup: restore instead of starting empty -------------------------------------
 
 def _setup_nonce(request: Request) -> str:

@@ -88,7 +88,7 @@ def by_name(username: str) -> dict | None:
 
 def all_users() -> list[dict]:
     return db.query(
-        "SELECT u.*, (SELECT COUNT(*) FROM vms v WHERE v.owner_id=u.id AND v.status != 'destroyed') AS vm_count"
+        "SELECT u.*, (SELECT COUNT(*) FROM vms v WHERE v.owner_id=u.id AND v.status NOT IN ('destroyed', 'forgotten')) AS vm_count"
         " FROM users u ORDER BY u.username")
 
 

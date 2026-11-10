@@ -170,7 +170,7 @@ class FullRestore:
         return {"created_at": m.get("created_at", ""), "created_by": m.get("created_by", ""),
                 "installation_id": m.get("installation_id", ""), "users": len(self.users),
                 "admins": sum(u.role == "admin" and not u.disabled for u in self.users),
-                "vms": sum(v.status != "destroyed" for v in self.vms), "images": len(self.images),
+                "vms": sum(v.status not in db.GONE for v in self.vms), "images": len(self.images),
                 "jobs": len(self.jobs), "logs": len(self.logs)}
 
 
@@ -234,7 +234,7 @@ def plan_full_restore(b: Backup, *, public_key_encrypted: bool = False) -> FullR
         raise BackupError("VMs: rows in the wrong format for a full backup")
     if len({v.id for v in vm_rows}) != len(vm_rows):
         raise BackupError("VMs: duplicate ids")
-    active = [v.name for v in vm_rows if v.status != "destroyed"]
+    active = [v.name for v in vm_rows if v.status not in db.GONE]
     if len(set(active)) != len(active):
         raise BackupError("VMs: the same name is used twice")
     states = {}
@@ -245,7 +245,7 @@ def plan_full_restore(b: Backup, *, public_key_encrypted: bool = False) -> FullR
         tfvars = b.files.get(f"vms/{v.name}/terraform.tfvars.json")
         if state is None and tfvars is None:
             continue
-        if v.status == "destroyed" or state is None or tfvars is None:
+        if v.status in db.GONE or state is None or tfvars is None:
             raise BackupError(f"VMs: unexpected or incomplete state files for {v.name}")
         check_state(v.name, state)
         states[v.name] = (state, check_tfvars(v.name, tfvars))

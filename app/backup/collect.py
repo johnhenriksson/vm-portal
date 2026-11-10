@@ -75,7 +75,7 @@ def vm_entries(b: Backup) -> list[dict]:
     out = []
     for r in rows(VmRow, b.json("db/vms.json", []), "VMs"):
         state = b.files.get(f"vms/{r.name}/terraform.tfstate")
-        if r.status == "destroyed" or state is None:
+        if r.status in db.GONE or state is None:
             continue
         owner = r.owner_username if b.kind == "vms" else users.get(r.owner_id)
         out.append({"row": r, "owner": owner if isinstance(owner, str) else None, "state": state,
@@ -137,13 +137,13 @@ def full(by: str, include_logs: bool = False) -> tuple[dict[str, bytes], dict]:
                                            indent=1).encode()
     files["secrets.json"] = json.dumps({k: v for k, v in stored.items() if k in SECRET_FIELDS}).encode()
     for vm in tables["vms"]:
-        if vm["status"] != "destroyed":
+        if vm["status"] not in db.GONE:
             files.update(_state_files(vm["name"]))
     files.update(_custom_images())
     if include_logs:
         files.update(_job_logs())
     return files, {"installation_id": inst, "created_by": by, "app": "vm-portal",
-                   "counts": {"users": len(tables["users"]), "vms": sum(v["status"] != "destroyed"
+                   "counts": {"users": len(tables["users"]), "vms": sum(v["status"] not in db.GONE
                                                                           for v in tables["vms"]),
                               "images": len({n.split("/")[1] for n in files if n.startswith("images/")}),
                               "logs": include_logs}}

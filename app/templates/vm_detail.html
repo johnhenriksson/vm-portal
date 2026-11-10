@@ -172,5 +172,24 @@
     </form>
   </div>
 </div>
+{% if current_user.role == "admin" %}
+<div class="section card danger-zone" id="forget">
+  <div class="card-head">Forget</div>
+  <div class="card-body">
+    <p>Forgetting <strong>{{ vm.name }}</strong> removes it from this portal and leaves it running in vCenter,
+      unchanged. Do this after moving it to another portal, so two portals never manage the same VM.
+      {% if can_resize %}<a href="/settings/backup?vm={{ vm.name }}">Export it</a> first if no other portal has it yet:
+      without its OpenTofu state, no portal can resize or destroy it.{% endif %}</p>
+    <form method="post" action="/vms/{{ vm.name }}/forget" class="row" style="align-items:flex-end">
+      {{ csrf_field(request) }}
+      <label class="field" style="margin:0;flex:1;min-width:12rem;max-width:22rem"><span class="label">Type <code>{{ vm.name }}</code> to confirm</span>
+        <input name="typed" required pattern="{{ vm.name }}" autocomplete="off"></label>
+      <label class="field" style="margin:0;flex:1;min-width:12rem;max-width:16rem"><span class="label">Your password</span>
+        <input type="password" name="confirm" required autocomplete="current-password" maxlength="256"></label>
+      <button class="btn-outline">Forget VM</button>
+    </form>
+  </div>
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}

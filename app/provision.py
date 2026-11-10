@@ -202,6 +202,24 @@ def destroy(vm: dict, user_id: int | None = None) -> int:
     return job_id
 
 
+def forget(vm: dict) -> Path | None:
+    """Stop managing a VM without touching it in vCenter (it moved to another portal).
+
+    Its OpenTofu files are kept aside in DATA_DIR/forgotten, like a destroyed VM's, so a
+    mistake can still be undone by importing a backup. The caller holds the VM's job lock."""
+    d = vm_dir(vm["name"])
+    kept = None
+    if d.exists():
+        kept = get_settings().data_dir / "forgotten" / f"{vm['name']}-{vm['id']}"
+        kept.parent.mkdir(mode=0o700, exist_ok=True)
+        if kept.exists():
+            raise ValueError(f"{kept} already exists")
+        shutil.move(d, kept)
+        shutil.rmtree(kept / ".terraform", ignore_errors=True)
+    db.execute("UPDATE vms SET status='forgotten' WHERE id=?", (vm["id"],))
+    return kept
+
+
 # --- existing VMs ---------------------------------------------------------------------
 
 STATE_HISTORY = 5

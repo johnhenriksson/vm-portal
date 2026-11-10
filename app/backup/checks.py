@@ -127,7 +127,7 @@ class _Row(BaseModel):
 class VmRow(_Row):
     id: int | None = None
     name: str
-    status: Literal["provisioning", "ready", "failed", "destroying", "destroyed"]
+    status: Literal["provisioning", "ready", "failed", "destroying", "destroyed", "forgotten"]
     template: str = Field(max_length=255)
     cpus: int = Field(ge=1, le=32)
     memory_mb: int = Field(ge=512, le=262144)

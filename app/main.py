@@ -213,8 +213,13 @@ async def dashboard(request: Request, user: dict = Depends(require_user)):
     vms, err = await vm_rows(user)
     tmpls, err2 = await vcenter(vsphere.templates)
     from .routes_images import group_templates
+    forgotten = request.query_params.get("forgotten", "")
+    try:
+        forgotten = provision.validate_name(forgotten) if forgotten and is_admin(user) else None
+    except ValueError:
+        forgotten = None
     return render(request, "dashboard.html", vms=vms, groups=group_templates(tmpls or []),
-                  jobs=visible_jobs(user, 8), error=err or err2,
+                  jobs=visible_jobs(user, 8), error=err or err2, forgotten=forgotten,
                   backup_health=schedule.health() if is_admin(user) else None)
 
 

@@ -239,3 +239,59 @@ def test_dashboard_warns_admins_when_backups_fail(monkeypatch):
     with client() as c:
         login(c)
         assert "Scheduled backups are failing: disk full" in c.get("/").text
+
+
+def test_forget_vm(fakes, monkeypatch, data_dir):
+    with client() as c:
+        login(c)
+        d = make_vm()
+        assert 'action="/vms/web-01/forget"' in c.get("/vms/web-01").text
+        url, tok = "/vms/web-01/forget", csrf(c, "/vms/web-01")
+        assert c.post(url, data={"typed": "web-0", "confirm": ADMIN_PW, "csrf_token": tok}).status_code == 400
+        assert c.post(url, data={"typed": "web-01", "confirm": "wrong", "csrf_token": tok}).status_code == 400
+        assert db.active_vm("web-01") and d.exists()
+        exported = download(c, what="vms", vms="web-01").content
+
+        class Busy:
+            def locked(self):
+                return True
+        with monkeypatch.context() as m:
+            m.setattr(jobs, "lock_for", lambda key: Busy())
+            assert c.post(url, data={"typed": "web-01", "confirm": ADMIN_PW, "csrf_token": tok}).status_code == 409
+
+        # Nothing runs against vCenter: no job, no OpenTofu.
+        def no_job(*a, **k):
+            raise AssertionError("forgetting a VM must not start a job")
+        monkeypatch.setattr(jobs, "submit", no_job)
+        r = c.post(url, data={"typed": "web-01", "confirm": ADMIN_PW, "csrf_token": tok}, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/?forgotten=web-01"
+        assert "no longer manages <strong>web-01</strong>" in c.get(r.headers["location"]).text
+        assert db.active_vm("web-01") is None and not d.exists()
+        assert db.one("SELECT status FROM vms WHERE name='web-01'")["status"] == "forgotten"
+        kept = list((data_dir / "forgotten").iterdir())
+        assert len(kept) == 1 and kept[0].name.startswith("web-01-") and (kept[0] / "terraform.tfstate").exists()
+        assert db.one("SELECT detail FROM audit WHERE action='vm.forgotten'")["detail"].startswith("web-01")
+        # Its name and IP are free here again, and it's no longer in backups.
+        assert "10.0.0.11" not in db.reserved_ips() and c.get("/vms/web-01").status_code == 404
+        full = download(c).content
+        assert not [n for n in archive.read(full, PASS).files if n.startswith("vms/")]
+        # A full backup with the forgotten VM in it still opens.
+        assert "Restore everything" in open_backup(c, full).text
+        # Forgotten by mistake: import it back.
+        page = open_backup(c, exported)
+        r = c.post("/settings/backup/import-vms", data={"token": token(page), "names": "web-01",
+                                                        "csrf_token": csrf(c, "/settings/backup")})
+        assert "Imported web-01" in r.text and db.active_vm("web-01")
+
+
+def test_only_admins_forget_vms(fakes):
+    with client() as c:
+        login(c)
+        make_vm(owner="bob")
+    with client() as c:
+        login(c, "bob", "correct horse battery")
+        assert c.get("/vms/web-01").status_code == 200
+        assert 'action="/vms/web-01/forget"' not in c.get("/vms/web-01").text
+        r = c.post("/vms/web-01/forget", data={"typed": "web-01", "confirm": "correct horse battery",
+                                               "csrf_token": csrf(c, "/vms/web-01")})
+        assert r.status_code == 403 and db.active_vm("web-01")

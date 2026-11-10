@@ -591,7 +591,7 @@ async def user_password(request: Request, uid: int, user: dict = Depends(require
 @router.post("/settings/users/{uid}/delete")
 async def user_delete(request: Request, uid: int, user: dict = Depends(require_admin)):
     u = _target_user(uid, user)
-    if db.one("SELECT 1 FROM vms WHERE owner_id=? AND status != 'destroyed'", (uid,)):
+    if db.one("SELECT 1 FROM vms WHERE owner_id=? AND status NOT IN ('destroyed', 'forgotten')", (uid,)):
         return render_settings(request, "users", status_code=400,
                                error=f"{u['username']} still owns VMs. Destroy them or disable the user instead.")
     db.execute("DELETE FROM users WHERE id=?", (uid,))
