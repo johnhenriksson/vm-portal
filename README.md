@@ -223,6 +223,9 @@ that section before offering vm-portal to third parties.
 
 ## Roadmap
 
+- **Proxmox VE** as a second platform beside vSphere: the same portal (users,
+  images, IPs, jobs, backups) creating VMs on a Proxmox cluster, with templates
+  built by Packer's Proxmox builder
 - Windows images (needs a sysprep or cloudbase-init guest driver)
 - NetBox as IPAM provider
 - Re-deploy or edit the compose app on an existing VM
