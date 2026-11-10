@@ -39,6 +39,7 @@ class VMRequest:
     features: tuple[str, ...] = ("docker",)     # image features (from the image definition)
     image_id: str | None = None
     network_interface: str = "en*"              # template's NIC name or glob (from the image definition)
+    autostart: bool = True                      # start with its host
 
 
 def validate_name(name: str) -> str:
@@ -143,10 +144,11 @@ def create(req: VMRequest, owner_id: int | None = None) -> int:
         raise ValueError(f"A Terraform directory for {req.name!r} already exists ({d})")
     vm_id = db.execute(
         "INSERT INTO vms (name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose, created_at,"
-        " owner_id, console_login, vm_user, image_id) VALUES (?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " owner_id, console_login, vm_user, image_id, autostart)"
+        " VALUES (?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (req.name, req.template, req.cpus, req.memory_mb, req.disk_gb,
          "static" if req.ip else "dhcp", req.ip, int(bool(req.compose_yaml)), db.now(), owner_id,
-         int(bool(req.console_password_hash)), req.login_user, req.image_id),
+         int(bool(req.console_password_hash)), req.login_user, req.image_id, int(req.autostart)),
     )
 
     async def run(job_id: int, log: jobs.JobLog) -> None:
@@ -162,6 +164,8 @@ def create(req: VMRequest, owner_id: int | None = None) -> int:
         out = await _output(d)
         ip = out.get("ip") or req.ip
         db.execute("UPDATE vms SET ip=? WHERE id=?", (ip, vm_id))
+        if req.autostart:
+            await enable_autostart(req.name, log)
         log.step(f"VM ready at {ip}: ssh {req.login_user}@{ip}")
 
     job_id = jobs.submit(
@@ -171,6 +175,24 @@ def create(req: VMRequest, owner_id: int | None = None) -> int:
     )
     db.execute("UPDATE vms SET last_job_id=? WHERE id=?", (job_id, vm_id))
     return job_id
+
+
+HOST_AUTOSTART_OFF = ("Host {host} has autostart turned off, so the VM won't start with it. An administrator"
+                      " can turn it on in vCenter (the host > Configure > VM Startup/Shutdown).")
+
+
+async def enable_autostart(name: str, log: jobs.JobLog) -> None:
+    """Add a new VM to its host's startup list. A failure only warns: the VM itself is
+    fine, and its page offers to try again."""
+    from . import vsphere
+    log.step("Turning on autostart")
+    try:
+        st = await asyncio.to_thread(vsphere.set_autostart, name, vm_moid(name), True)
+    except Exception as e:  # noqa: BLE001 - reported in the log, never fails the job
+        log.write(f"Warning: couldn't turn on autostart ({e}). Try again from the VM page.\n")
+        return
+    if not st.host_enabled:
+        log.write("Warning: " + HOST_AUTOSTART_OFF.format(host=st.host) + "\n")
 
 
 def destroy(vm: dict, user_id: int | None = None) -> int:

@@ -70,6 +70,7 @@ def test_tfvars_are_checked_and_lose_connection_settings():
 
 def test_import_into_another_portal(vcenter, data_dir):
     make_vm()
+    db.execute("UPDATE vms SET autostart=1")
     b = export()
     # "Another portal": the VM's record and folder are gone, alice exists there too.
     db.execute("DELETE FROM vms")
@@ -81,6 +82,7 @@ def test_import_into_another_portal(vcenter, data_dir):
     assert restore.import_vms(plan, ["web-01"], admin(), "test") == ["web-01"]
     vm = db.active_vm("web-01")
     assert vm["status"] == "ready" and vm["owner_id"] == users.by_name("alice")["id"] and vm["notes"] == "hi"
+    assert vm["autostart"] == 1
     d = provision.vm_dir("web-01")
     assert provision.vm_moid("web-01") == "vm-42"
     assert "vsphere_server" not in json.loads((d / "terraform.tfvars.json").read_text())

@@ -132,10 +132,10 @@ def import_vms(imports: list[VmImport], names: list[str], user: dict, source: st
         if not imp.replace:
             db.execute(
                 "INSERT INTO vms (name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose,"
-                " created_at, owner_id, console_login, vm_user, image_id, notes)"
-                " VALUES (?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " created_at, owner_id, console_login, vm_user, image_id, notes, autostart)"
+                " VALUES (?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (r.name, r.template, r.cpus, r.memory_mb, r.disk_gb, r.ip_mode, r.ip, r.has_compose,
-                 r.created_at, imp.owner_id, r.console_login, r.vm_user, r.image_id, r.notes))
+                 r.created_at, imp.owner_id, r.console_login, r.vm_user, r.image_id, r.notes, r.autostart))
         db.audit("vm.state_imported", f"{imp.name} ({imp.moid}){' replaced' if imp.replace else ''} from {source}",
                  username=user["username"])
         done.append(imp.name)
@@ -354,11 +354,11 @@ def _build_staging(plan: FullRestore, by: str) -> Path:
                       (k, json.dumps(v), ts))
         for v in plan.vms:
             c.execute("INSERT INTO vms (id, name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose,"
-                      " created_at, last_job_id, owner_id, console_login, vm_user, image_id, notes)"
-                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      " created_at, last_job_id, owner_id, console_login, vm_user, image_id, notes, autostart)"
+                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                       (v.id, v.name, v.status, v.template, v.cpus, v.memory_mb, v.disk_gb, v.ip_mode, v.ip,
                        v.has_compose, v.created_at, v.last_job_id, v.owner_id, v.console_login, v.vm_user,
-                       v.image_id, v.notes))
+                       v.image_id, v.notes, v.autostart))
         for i in plan.image_settings:
             data = json.loads(i.data)
             if i.image_id in plan.images and not editing:

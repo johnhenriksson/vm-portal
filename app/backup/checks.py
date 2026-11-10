@@ -142,6 +142,7 @@ class VmRow(_Row):
     vm_user: str | None = None
     image_id: str | None = None
     notes: str = Field("", max_length=2000)
+    autostart: int | None = Field(None, ge=0, le=1)   # None: not managed (and backups from before it)
     owner_username: str | None = None   # only in VM backups: ids mean nothing on another portal
 
     @field_validator("name")

@@ -139,6 +139,10 @@
       <span class="hint">Saved to <code>/opt/app/compose.yaml</code> and started on first boot.</span>
     </label>
     </div>
+    <label class="check-field"><input type="checkbox" name="autostart" value="on" {% if form.autostart %}checked{% endif %}>
+      <span><span class="label">Start with its host</span>
+        <span class="hint">Powers the VM on when its ESXi host starts, for example after a power cut.
+          You can change this later on the VM page.</span></span></label>
   </section>
 </div>
 

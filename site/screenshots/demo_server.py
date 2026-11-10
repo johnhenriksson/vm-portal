@@ -104,6 +104,8 @@ vsphere.inventory = lambda *a, **kw: {
         {"name": "Cluster-01", "networks": ["VM Network"],
          "datastores": [{"name": "vsanDatastore", "type": "vsan", "free_gb": 6120, "capacity_gb": 12288}]}]}]}
 vsphere.power = lambda name, action: None
+vsphere.autostart = lambda name, moid=None: vsphere.Autostart(True, "esx-01.example.com", True)
+vsphere.set_autostart = lambda name, moid, on: vsphere.Autostart(on, "esx-01.example.com", True)
 
 
 async def _no_ping(ips):
@@ -130,8 +132,8 @@ def seed() -> None:
         created = ago(days=days, hours=3)
         vm_id = db.execute(
             "INSERT INTO vms (name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose, created_at,"
-            " owner_id, console_login, vm_user, image_id, notes) VALUES (?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-            " ?, ?)",
+            " owner_id, console_login, vm_user, image_id, notes, autostart) VALUES (?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?,"
+            " ?, ?, ?, ?, ?, 1)",
             (name, tmpl, cpus, mem, disk, mode, ip, int(compose), stamp(created), uid[owner], int(name == "web-01"),
              "debian" if image_id == "debian-13" else "ubuntu", image_id, notes))
         d = get_settings().vms_dir / name

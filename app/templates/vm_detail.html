@@ -36,6 +36,20 @@
 </div>
 
 {% if busy %}<div class="alert warn"><span aria-busy="true"></span>A job is running for this VM.</div>{% endif %}
+{% set autostart_wanted = vm.autostart == 1 %}
+{% if autostart and vm.autostart is not none and autostart.enabled != autostart_wanted %}
+<div class="alert warn row" style="justify-content:space-between">
+  <span>Autostart should be {{ "on" if autostart_wanted else "off" }}, but host {{ autostart.host }} has it
+    {{ "on" if autostart.enabled else "off" }}. This happens when the VM moves to another host, or when
+    someone changes it in vCenter.</span>
+  {% if not busy %}<form method="post" action="/vms/{{ vm.name }}/autostart">{{ csrf_field(request) }}
+    {% if autostart_wanted %}<input type="hidden" name="enabled" value="on">{% endif %}
+    <button class="btn-outline btn-sm">Reapply</button></form>{% endif %}
+</div>
+{% elif autostart and autostart.enabled and not autostart.host_enabled %}
+<div class="alert warn">Host {{ autostart.host }} has autostart turned off, so {{ vm.name }} won't start
+  with it. An administrator can turn it on in vCenter (the host &gt; Configure &gt; VM Startup/Shutdown).</div>
+{% endif %}
 
 <div class="grid-2">
   <div class="card">
@@ -47,6 +61,10 @@
         <dt>Created</dt><dd>{{ vm.created_at[:16] | replace("T", " ") }}</dd>
         <dt>Template</dt><dd>{{ link(links.template(vm.template, vm.image_id), vm.template) }}</dd>
         {% if current_user.role == "admin" %}<dt>Owner</dt><dd>{{ owner or "–" }}</dd>{% endif %}
+        <dt>Autostart</dt><dd>{% if autostart %}{{ "On" if autostart.enabled else "Off" }}
+          {%- if vm.autostart is none %} <span class="muted">(not managed by the portal)</span>{% endif %}
+          {%- if autostart.enabled and not autostart.host_enabled %}<br><span class="error">Host {{ autostart.host }} has autostart turned off</span>{% endif %}
+          {%- elif autostart_error %}<span class="muted" title="{{ autostart_error }}">Unknown</span>{% else %}–{% endif %}</dd>
         <dt>Compose app</dt><dd>{{ "Yes, /opt/app/compose.yaml" if vm.has_compose else "No" }}</dd>
         {% if vm.notes %}<dt>Notes</dt><dd class="notes">{{ vm.notes }}</dd>{% endif %}
       </dl>
@@ -122,6 +140,20 @@
         {% endif %}
         <button class="btn-outline">Save</button>
       </form>
+      <hr>
+      {% if autostart %}
+      <form method="post" action="/vms/{{ vm.name }}/autostart">
+        {{ csrf_field(request) }}
+        <label class="check-field"><input type="checkbox" name="enabled" value="on"
+            {% if (autostart.enabled if vm.autostart is none else autostart_wanted) %}checked{% endif %}>
+          <span><span class="label">Start with its host</span>
+            <span class="hint">Powers the VM on when host {{ autostart.host }} starts, for example after a
+              power cut. Set on the host in vCenter.</span></span></label>
+        <button class="btn-outline">Save autostart</button>
+      </form>
+      {% else %}
+      <p class="muted" style="margin:0">Autostart can be changed once vCenter reports the VM.</p>
+      {% endif %}
     </div>
   </div>
 </div>

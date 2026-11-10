@@ -1,7 +1,7 @@
 """Read-only vCenter queries and power operations (pyVmomi).
 
 Provisioning itself goes through Terraform; this module is for listing templates,
-showing VM state, and powering VMs on/off. All functions are blocking: call them
+showing VM state, powering VMs on/off and setting their autostart. All functions are blocking: call them
 with run_in_threadpool / asyncio.to_thread.
 """
 import hashlib
@@ -205,6 +205,52 @@ def power(name: str, action: str, moid: str | None = None) -> None:
         else:
             raise ValueError(f"unknown power action {action!r}")
     _invalidate()
+
+
+@dataclass
+class Autostart:
+    """A VM's entry in its host's VM startup list. vSphere keeps that list per host, and the
+    entry only acts when the host itself has autostart turned on (vSphere HA turns it off)."""
+    enabled: bool        # the VM's entry says power on
+    host: str            # the host the VM is on now
+    host_enabled: bool   # the host starts VMs at all
+
+
+def _host_of(vm):
+    host = vm.runtime.host
+    if host is None:
+        raise LookupError(f"VM {vm.name!r} has no host")
+    return host
+
+
+def _autostart_locked(vm) -> Autostart:
+    host = _host_of(vm)
+    cfg = host.configManager.autoStartManager.config
+    entry = next((p for p in (cfg.powerInfo or []) if p.key._moId == vm._moId), None)
+    return Autostart(enabled=entry is not None and entry.startAction == "powerOn", host=host.name,
+                     host_enabled=bool(cfg.defaults and cfg.defaults.enabled))
+
+
+def autostart_spec(vm, enabled: bool):
+    """One entry for this VM, in any start order, with the host's default delays; the host's
+    own settings and the other VMs' entries are left as they are."""
+    info = vim.host.AutoStartManager.AutoPowerInfo(
+        key=vm, startOrder=-1, startDelay=-1, waitForHeartbeat="systemDefault",
+        startAction="powerOn" if enabled else "none", stopDelay=-1, stopAction="systemDefault")
+    return vim.host.AutoStartManager.Config(powerInfo=[info])
+
+
+def autostart(name: str, moid: str | None = None) -> Autostart:
+    with _lock:
+        return _autostart_locked(_find_vm_locked(name, moid))
+
+
+def set_autostart(name: str, moid: str | None, enabled: bool) -> Autostart:
+    """Turn the VM's autostart entry on or off on the host it's on now; returns the result."""
+    with _lock:
+        vm = _find_vm_locked(name, moid)
+        _host_of(vm).configManager.autoStartManager.ReconfigureAutostart(autostart_spec(vm, enabled))
+        return _autostart_locked(vm)
 
 
 def delete_template(name: str) -> None:

@@ -8,8 +8,8 @@ same web interface. Runs as a single container.
   IP from a pool (with a free-IP finder), SSH keys, an optional console password
   and an optional `compose.yaml` that starts on first boot
 - **Manage VMs**: power on/off/reboot, **resize** (vCPUs, memory, grow the
-  disk), notes, change owner, destroy, SSH command, and a **browser console**
-  (noVNC) that works without access to the ESXi hosts
+  disk), **autostart** with the host, notes, change owner, destroy, SSH command,
+  and a **browser console** (noVNC) that works without access to the ESXi hosts
 - **Images**: a catalog of image definitions (Packer templates): Ubuntu 26.04
   + Docker, Debian 13 + Docker and Rocky Linux 10 are built in. Configure each
   one's installer ISO, sizes and parameters; build with a live log; old
@@ -162,11 +162,30 @@ Don't use `administrator@vsphere.local`. Create a user such as
   Configure CD media, Device connection, Console interaction, Guest operating system management by VIX API);
   Inventory (Create new, Create from existing, Remove);
   Provisioning (Clone template, Clone virtual machine, Deploy template, Mark as template, Mark as virtual machine)
+- **Host**: Configuration > Virtual machine autostart configuration
 - **Sessions**: Validate session
 - **Profile-driven storage**: View
 
 Assign it on the datacenter (propagate to children). Packer builds need the same
 permissions plus upload access to the datastore with the ISOs.
+
+### Autostart
+
+New VMs start with their ESXi host (the box on the create form is ticked by
+default), and the owner can turn that on or off on the VM's page. vSphere keeps
+this per host, in the host's VM startup list, so:
+
+- The host itself must have autostart turned on (the host > Configure > VM
+  Startup/Shutdown). The portal never changes that, because it affects every
+  VM on the host; it warns on the VM page and in the create log instead.
+- vSphere HA turns host autostart off. On an HA cluster, HA restarts VMs
+  instead, and this setting does nothing.
+- If a VM moves to another host (vMotion, DRS), its entry may stay behind. The
+  VM page shows when the host disagrees with the setting, with a button to
+  apply it again.
+
+VMs from before this setting existed, and VMs imported from older backups,
+aren't managed: the page shows what the host says until someone saves a choice.
 
 ## Development
 

@@ -66,11 +66,12 @@ def test_environment_secrets_never_go_into_a_backup():
 
 def test_full_round_trip_on_the_same_installation(keypair):
     populate()
+    db.execute("UPDATE vms SET autostart=0")
     inst = collect.installation_id()
     data, _ = full_backup([keypair[1]])
     # Things change after the backup...
     db.execute("DELETE FROM users WHERE username='alice'")
-    db.execute("UPDATE vms SET notes='changed'")
+    db.execute("UPDATE vms SET notes='changed', autostart=1")
     db.save_settings({"default_cpus": 8}, set(), by="t")
     (provision.vm_dir("web-01") / "terraform.tfstate").write_text("damaged")
     old_epoch = auth.session_epoch()
@@ -82,6 +83,7 @@ def test_full_round_trip_on_the_same_installation(keypair):
     restore.apply_full_restore(plan, by="boss")
 
     assert users.by_name("alice") and db.active_vm("web-01")["notes"] == "hi"
+    assert db.active_vm("web-01")["autostart"] == 0
     config.get_settings.cache_clear()
     s = config.get_settings()
     assert s.default_cpus == 4 and db.load_settings()["vsphere_password"] == "stored-secret"

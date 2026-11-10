@@ -80,6 +80,8 @@ MIGRATIONS = [
     ("vms", "vm_user", "TEXT"),
     ("vms", "image_id", "TEXT"),
     ("vms", "notes", "TEXT NOT NULL DEFAULT ''"),
+    # Wanted autostart: 1 on, 0 off, NULL not managed (VMs from before the setting existed).
+    ("vms", "autostart", "INTEGER"),
 ]
 
 _lock = threading.Lock()

@@ -257,7 +257,7 @@ def _new_vm_form(tmpls: list) -> dict:
     s = get_settings()
     first = image_choices(tmpls)
     return {"cpus": s.default_cpus, "memory_mb": s.default_memory_mb, "disk_gb": s.default_disk_gb,
-            "template": first[0]["templates"][0].name if first else "", "ip_mode": "dhcp"}
+            "template": first[0]["templates"][0].name if first else "", "ip_mode": "dhcp", "autostart": True}
 
 
 @app.get("/vms/new", dependencies=auth)
@@ -282,9 +282,10 @@ async def vm_create(
     console_password: str = Form("", max_length=256),
     console_password_confirm: str = Form("", max_length=256),
     compose_yaml: str = Form("", max_length=100000),
+    autostart: str = Form(""),
 ):
     form = dict(name=name, template=template, cpus=cpus, memory_mb=memory_mb, disk_gb=disk_gb,
-                ip_mode=ip_mode, ip=ip, ssh_keys=ssh_keys, compose_yaml=compose_yaml)
+                ip_mode=ip_mode, ip=ip, ssh_keys=ssh_keys, compose_yaml=compose_yaml, autostart=autostart == "on")
     tmpls, tmpls_err = await vcenter(vsphere.templates)
 
     async def fail(msg: str):
@@ -339,7 +340,8 @@ async def vm_create(
                               disk_gb=disk_gb, ip=static_ip, ssh_keys=keys, compose_yaml=compose,
                               console_password_hash=console_hash, login_user=images.login_user(img, cfg),
                               guest=driver.name, features=features, image_id=img.id if img else None,
-                              network_interface=img.manifest.network_interface if img and img.usable else "en*")
+                              network_interface=img.manifest.network_interface if img and img.usable else "en*",
+                              autostart=autostart == "on")
     try:
         job_id = provision.create(req, owner_id=user["id"])
     except ValueError as e:
@@ -365,7 +367,10 @@ async def vm_detail(request: Request, name: str, user: dict = Depends(require_us
     vm_jobs = db.query("SELECT * FROM jobs WHERE target=? AND kind LIKE 'vm-%' AND created_at >= ?"
                        " ORDER BY id DESC LIMIT 20", (name, vm["created_at"]))
     owner = users.get(vm["owner_id"]) if vm["owner_id"] else None
+    autostart, autostart_err = (await vcenter(vsphere.autostart, name, provision.vm_moid(name))
+                                if info and vm["status"] == "ready" else (None, None))
     return render(request, "vm_detail.html", vm=vm, info=info, jobs=vm_jobs, error=err,
+                  autostart=autostart, autostart_error=autostart_err,
                   owner=owner["username"] if owner else None, busy=jobs.is_locked(f"vm:{name}"),
                   all_users=[{"id": u["id"], "username": u["username"]} for u in users.all_users()]
                   if is_admin(user) else [],
@@ -443,6 +448,23 @@ async def vm_details(request: Request, name: str, user: dict = Depends(require_u
         db.audit("vm.notes_changed", name, username=user["username"], ip=client_ip(request))
     # The previous owner may no longer see the VM.
     return RedirectResponse(f"/vms/{name}" if new_owner == user["id"] or is_admin(user) else "/", status_code=303)
+
+
+@app.post("/vms/{name}/autostart")
+async def vm_autostart(request: Request, name: str, user: dict = Depends(require_user), enabled: str = Form("")):
+    """Start the VM with its host, or not: its entry in the host's startup list in vCenter."""
+    vm = _vm_or_404(name, user)
+    if vm["status"] != "ready":
+        raise HTTPException(409, "Only a ready VM's autostart can be changed")
+    if jobs.is_locked(f"vm:{name}"):
+        raise HTTPException(409, "A job is already running for this VM")
+    on = enabled == "on"
+    done, err = await vcenter(vsphere.set_autostart, name, provision.vm_moid(name), on)
+    if done is None:
+        raise HTTPException(502, err or "vCenter is not configured")
+    db.execute("UPDATE vms SET autostart=? WHERE id=?", (int(on), vm["id"]))
+    db.audit(f"vm.autostart.{'on' if on else 'off'}", name, username=user["username"], ip=client_ip(request))
+    return RedirectResponse(f"/vms/{name}", status_code=303)
 
 
 @app.post("/vms/{name}/destroy")
