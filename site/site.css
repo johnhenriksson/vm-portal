@@ -82,6 +82,10 @@ code { font: .88em var(--mono); background: var(--bg-alt); border: 1px solid var
                                 box-shadow: 0 24px 60px -24px rgba(3, 27, 78, .35); }
 @media (max-width: 900px) { .hero-grid { grid-template-columns: minmax(0, 1fr); } .hero { padding-top: 3rem; } }
 
+.demo-video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; background: #031b4e;
+              border: 1px solid var(--border); border-radius: 10px;
+              box-shadow: 0 24px 60px -24px rgba(3, 27, 78, .35); }
+
 /* sections */
 .section { padding: 5rem 0; }
 .section.alt { background: var(--bg-alt); border-block: 1px solid var(--border); }

@@ -20,6 +20,9 @@ port = int(sys.argv[2]) if len(sys.argv) > 2 else 8099
 if data.exists() and any(data.iterdir()):
     sys.exit(f"{data} is not empty; give an empty scratch directory")
 data.mkdir(parents=True, exist_ok=True)
+# Run from the scratch directory: the portal reads .env from the current directory, and a
+# developer's .env (real vCenter, addresses, keys) must never end up in a screenshot or video.
+os.chdir(data)
 
 # Packer and xorriso aren't needed to render pages; stand-ins keep preflight checks quiet.
 fake_bin = data / "bin"
@@ -27,6 +30,41 @@ fake_bin.mkdir()
 for tool in ("packer", "xorriso"):
     (fake_bin / tool).write_text("#!/bin/sh\nexit 0\n")
     (fake_bin / tool).chmod(0o755)
+
+# A stand-in for OpenTofu, so a VM created in the demo (the video does) runs the portal's
+# real create job and streams a believable log in a few seconds. Nothing leaves this machine.
+FAKE_TOFU = '''
+import json, pathlib, re, sys, time
+cmd = sys.argv[1:2]
+def say(*lines, pause=0.0):
+    for line in lines:
+        print(line, flush=True)
+        time.sleep(pause)
+if cmd == ["init"]:
+    say("Initializing modules...", "Initializing provider plugins...",
+        "- Installing vmware/vsphere v2.17.0...", "- Installed vmware/vsphere v2.17.0 (signed)", "",
+        "OpenTofu has been successfully initialized!", pause=0.25)
+elif cmd == ["apply"]:
+    say("data.vsphere_datacenter.this: Reading...", "data.vsphere_datacenter.this: Read complete after 0s",
+        "data.vsphere_virtual_machine.template[0]: Read complete after 1s", "", pause=0.3)
+    say("vsphere_virtual_machine.this: Creating...", pause=1.0)
+    say("vsphere_virtual_machine.this: Still creating... [10s elapsed]", pause=1.0)
+    say("vsphere_virtual_machine.this: Still creating... [20s elapsed]", pause=1.0)
+    say("vsphere_virtual_machine.this: Still creating... [30s elapsed]", pause=0.8)
+    say("vsphere_virtual_machine.this: Creation complete after 38s [id=4213c1f2-9d1e-8a6b-5c3f-1e2d3c4b5a69]",
+        "", "Apply complete! Resources: 1 added, 0 changed, 0 destroyed.", pause=0.2)
+    pathlib.Path("terraform.tfstate").write_text(json.dumps({"version": 4, "resources": [
+        {"mode": "managed", "type": "vsphere_virtual_machine", "name": "this",
+         "instances": [{"attributes": {"moid": "vm-1042"}}]}]}))
+elif cmd == ["output"]:
+    text = pathlib.Path("terraform.tfvars.json").read_text()
+    ips = [ip for ip in re.findall(r"192\\.0\\.2\\.\\d+", text) if not ip.endswith(".1")]
+    print(json.dumps({"ip": {"value": ips[0] if ips else "192.0.2.24"}}))
+elif cmd == ["show"]:
+    print("{}")
+'''
+(fake_bin / "tofu").write_text(f"#!{sys.executable}\n" + FAKE_TOFU)
+(fake_bin / "tofu").chmod(0o755)
 
 os.environ.update({
     "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -43,8 +81,9 @@ os.environ.update({
     "ALLOW_IMAGE_EDITING": "true",
 })
 
-from app import db, images, ipam, users, vsphere  # noqa: E402
-from app.config import get_settings  # noqa: E402
+from app import db, images, ipam, jobs, users, vsphere  # noqa: E402
+from app.backup import schedule  # noqa: E402
+from app.config import get_bootstrap, get_settings  # noqa: E402
 
 NOW = datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
@@ -87,6 +126,10 @@ def _vms(fresh: bool = False):
         ip, power = _rest[6], _rest[8]
         out[name] = vsphere.VMInfo(name, False, power_state=power, ip=ip if power == "poweredOn" else None,
                                    ips=[ip], tools_running=power == "poweredOn")
+    for vm in db.active_vms():   # created during the demo: running, at the address the fake tofu gave it
+        if vm["name"] not in out and vm["status"] == "ready":
+            out[vm["name"]] = vsphere.VMInfo(vm["name"], False, power_state="poweredOn", ip=vm["ip"],
+                                             ips=[vm["ip"]] if vm["ip"] else [], tools_running=True)
     return out
 
 
@@ -108,6 +151,14 @@ vsphere.autostart = lambda name, moid=None: vsphere.Autostart(True, "esx-01.exam
 vsphere.set_autostart = lambda name, moid, on: vsphere.Autostart(on, "esx-01.example.com", True)
 
 
+# As if /backups were mounted (nothing is written there: the demo never makes a scheduled backup).
+schedule.check_dir = lambda: get_bootstrap().backup_dir
+
+# Job logs show paths as they are in the container image, not this machine's.
+_write = jobs.JobLog.write
+jobs.JobLog.write = lambda self, text: _write(self, text.replace(str(data), "/data").replace(str(ROOT), "/app"))
+
+
 async def _no_ping(ips):
     return set()
 
@@ -118,6 +169,15 @@ ipam.arp_seen = lambda: set()
 # --- made-up records ---------------------------------------------------------------------
 
 def seed() -> None:
+    # Settings live in the portal, as after "Import from environment", so the settings
+    # pages don't open with the "set by environment variables" notice.
+    from app import config
+    values = {k: getattr(get_settings(), k) for k in config.env_overrides()}
+    db.save_settings(values, config.SECRET_FIELDS, by="admin")
+    for k in values:
+        os.environ.pop(k.upper(), None)
+    config.reset_caches()
+
     users.ensure_bootstrap()
     for name in ("alice", "bob", "ops"):
         users.create(name, secrets.token_urlsafe(16), "admin" if name == "ops" else "user")

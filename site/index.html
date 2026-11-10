@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- No scripts, fonts, analytics or anything else from other sites. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; media-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
   <title>vm-portal: self-service VMs on your own vSphere</title>
   <meta name="description" content="An open-source, self-hosted portal for VMware vSphere: users create VMs in a few clicks, admins build the templates with Packer from the same web interface. One container, Apache-2.0.">
@@ -32,6 +32,7 @@
     <a class="brand" href="./"><img src="favicon.svg" alt="" width="28" height="28"> vm-portal</a>
     <nav aria-label="Sections">
       <a href="#features">Features</a>
+      <a href="#demo">Demo</a>
       <a href="#screenshots">Screenshots</a>
       <a href="#security">Security</a>
       <a href="#quick-start">Quick start</a>
@@ -58,6 +59,19 @@
         <img src="img/dashboard.webp" width="1360" height="850"
              alt="The portal's list of virtual machines: names, status, power, IP addresses and sizes, with the available images below">
       </a>
+    </div>
+  </section>
+
+  <section id="demo" class="section alt" aria-labelledby="demo-title">
+    <div class="wrap">
+      <h2 id="demo-title">See it in action</h2>
+      <p class="section-lead">A one-minute tour: create a VM and watch it build, then power, resize and
+        autostart, templates and backups. Recorded from the real portal with made-up data.</p>
+      <video class="demo-video" controls preload="none" playsinline width="1920" height="1080"
+             poster="img/vm-portal-wide.jpg">
+        <source src="img/vm-portal-wide.mp4" type="video/mp4">
+        <a href="img/vm-portal-wide.mp4">Download the demo video (MP4)</a>
+      </video>
     </div>
   </section>
 

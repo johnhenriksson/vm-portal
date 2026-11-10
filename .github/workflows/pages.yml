@@ -38,6 +38,13 @@ jobs:
           site/screenshots/run.sh
           for f in dashboard create-vm vm-detail images build-log editor; do test -s "site/img/$f.webp"; done
           test -s site/img/og.png
+      - name: Record the demo video
+        # The same demo portal, clicked through by headless Chromium (site/video/record.py);
+        # encoded by ffmpeg from Ubuntu's archive, in a container with no network.
+        run: |
+          site/video/run.sh site/img wide
+          test -s site/img/vm-portal-wide.mp4
+          test -s site/img/vm-portal-wide.jpg
       - name: Fill in the repository's links
         # The page links to github.com/OWNER/vm-portal and OWNER.github.io/vm-portal;
         # point them at wherever this repository actually is.
