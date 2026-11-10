@@ -19,9 +19,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from . import db, provision, vsphere
+from . import db, provision
 from .auth import client_ip, require_user, session_user
 from .config import vcenter_configured
+from .platforms import current as platform
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,7 +101,7 @@ async def console_ws(ws: WebSocket, name: str):
     started = time.monotonic()
     try:
         try:
-            t = await asyncio.to_thread(vsphere.console_ticket, name, provision.vm_moid(name))
+            t = await asyncio.to_thread(platform().console_ticket, name, provision.vm_moid(name))
             ctx = await asyncio.to_thread(pinned_context, t.host, t.port, t.thumbprint)
             esx = await connect(f"wss://{t.host}:{t.port}{t.path}", ssl=ctx, subprotocols=["binary"],
                                 max_size=None, open_timeout=15, close_timeout=2, ping_interval=30)

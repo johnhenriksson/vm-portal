@@ -7,9 +7,11 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
 
-from . import config, db, packer, users, vsphere
+from . import config, db, packer, users
 from .auth import client_ip, current_user, require_admin, require_user, start_session
 from .config import SECRET_FIELDS, SECTIONS, Settings, env_overrides, get_settings
+from .platforms import current as platform
+from .platforms import vsphere   # the Settings → vCenter page is vSphere's own
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -274,7 +276,7 @@ def apply_changes(request: Request, user: dict, changes: dict) -> None:
     db.save_settings(changed, SECRET_FIELDS, by=user["username"])
     config.get_settings.cache_clear()
     if any(k.startswith("vsphere_") for k in changed):
-        vsphere.close()  # reconnect with the new settings
+        platform().close()  # reconnect with the new settings
     audit(request, user, "settings.changed", ", ".join(sorted(changed)))  # names only, never values
 
 

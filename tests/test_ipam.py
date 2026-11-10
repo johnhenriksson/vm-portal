@@ -1,6 +1,7 @@
 import pytest
 
 from app import db, ipam
+from app.platforms import vsphere
 
 ARP = """IP address       HW type     Flags       HW address            Mask     Device
 10.0.0.12        0x1         0x2         aa:bb:cc:dd:ee:ff     *        eth0
@@ -43,7 +44,7 @@ async def test_scan_combines_sources(monkeypatch):
                " VALUES ('a','ready','t',1,1,1,'static','10.0.0.10','now')")
     db.execute("INSERT INTO vms (name,status,template,cpus,memory_mb,disk_gb,ip_mode,ip,created_at)"
                " VALUES ('b','destroyed','t',1,1,1,'static','10.0.0.11','now')")
-    monkeypatch.setattr(ipam.vsphere, "used_ips", lambda: {"10.0.0.14"})
+    monkeypatch.setattr(vsphere, "used_ips", lambda: {"10.0.0.14"})
 
     async def fake_ping(ips):
         return {"10.0.0.12"} & set(ips)

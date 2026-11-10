@@ -1,21 +1,27 @@
-"""Read-only vCenter queries and power operations (pyVmomi).
+"""VMware vSphere: vCenter through pyVmomi, the vmware/vsphere OpenTofu provider, and
+Packer's vsphere-iso builder. Implements base.Platform.
 
-Provisioning itself goes through Terraform; this module is for listing templates,
-showing VM state, powering VMs on/off and setting their autostart. All functions are blocking: call them
-with run_in_threadpool / asyncio.to_thread.
+Provisioning itself goes through OpenTofu; the API part is for listing templates,
+showing VM state, powering VMs on/off and setting their autostart. All functions are
+blocking: call them with run_in_threadpool / asyncio.to_thread.
 """
 import hashlib
+import re
 import ssl
 from urllib.parse import urlsplit
 import threading
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim, vmodl
 
-from .config import get_settings, vcenter_configured
+from ..config import get_settings, vcenter_configured
+from .base import CREATED_BY, Autostart, ConsoleTicket, VMInfo
+
+NAME = "vsphere"
+LABEL = "VMware vSphere"
 
 _lock = threading.Lock()
 _si = None
@@ -30,24 +36,6 @@ PROPS = [
     "guest.net",
     "guest.toolsRunningStatus",
 ]
-
-
-@dataclass
-class VMInfo:
-    name: str
-    is_template: bool
-    power_state: str = ""
-    ip: str | None = None
-    ips: list[str] = field(default_factory=list)
-    created: datetime | None = None
-    notes: str = ""
-    tools_running: bool = False
-
-    @property
-    def age_days(self) -> int | None:
-        if not self.created:
-            return None
-        return (datetime.now(timezone.utc) - self.created).days
 
 
 def _connect():
@@ -160,7 +148,7 @@ def all_vms(fresh: bool = False) -> list[VMInfo]:
 
 def templates() -> list[VMInfo]:
     """Templates matching the configured prefixes, newest first."""
-    from .images import template_prefixes
+    from ..images import template_prefixes
     prefixes = tuple(p + "-" for p in template_prefixes())
     ts = [v for v in all_vms() if v.is_template and v.name.startswith(prefixes)]
     epoch = datetime.min.replace(tzinfo=timezone.utc)
@@ -190,10 +178,10 @@ def _wait(task, timeout: int = 300) -> None:
         raise RuntimeError(task.info.error.msg)
 
 
-def power(name: str, action: str, moid: str | None = None) -> None:
+def power(name: str, action: str, vm_id: str | None = None) -> None:
     """action: on, off (hard), shutdown (guest), reboot (guest)."""
     with _lock:
-        vm = _find_vm_locked(name, moid)
+        vm = _find_vm_locked(name, vm_id)
         if action == "on":
             _wait(vm.PowerOnVM_Task())
         elif action == "off":
@@ -205,15 +193,6 @@ def power(name: str, action: str, moid: str | None = None) -> None:
         else:
             raise ValueError(f"unknown power action {action!r}")
     _invalidate()
-
-
-@dataclass
-class Autostart:
-    """A VM's entry in its host's VM startup list. vSphere keeps that list per host, and the
-    entry only acts when the host itself has autostart turned on (vSphere HA turns it off)."""
-    enabled: bool        # the VM's entry says power on
-    host: str            # the host the VM is on now
-    host_enabled: bool   # the host starts VMs at all
 
 
 def _host_of(vm):
@@ -240,15 +219,15 @@ def autostart_spec(vm, enabled: bool):
     return vim.host.AutoStartManager.Config(powerInfo=[info])
 
 
-def autostart(name: str, moid: str | None = None) -> Autostart:
+def autostart(name: str, vm_id: str | None = None) -> Autostart:
     with _lock:
-        return _autostart_locked(_find_vm_locked(name, moid))
+        return _autostart_locked(_find_vm_locked(name, vm_id))
 
 
-def set_autostart(name: str, moid: str | None, enabled: bool) -> Autostart:
+def set_autostart(name: str, vm_id: str | None, enabled: bool) -> Autostart:
     """Turn the VM's autostart entry on or off on the host it's on now; returns the result."""
     with _lock:
-        vm = _find_vm_locked(name, moid)
+        vm = _find_vm_locked(name, vm_id)
         _host_of(vm).configManager.autoStartManager.ReconfigureAutostart(autostart_spec(vm, enabled))
         return _autostart_locked(vm)
 
@@ -439,21 +418,146 @@ def list_isos() -> list[str]:
 
 # --- console ------------------------------------------------------------------
 
-@dataclass
-class ConsoleTicket:
-    host: str
-    port: int
-    path: str          # contains the one-time ticket; never sent to the browser
-    thumbprint: str    # ESXi certificate thumbprint as reported by vCenter
-
-
-def console_ticket(name: str, moid: str | None = None) -> ConsoleTicket:
+def console_ticket(name: str, vm_id: str | None = None) -> ConsoleTicket:
     """A short-lived WebMKS (VNC over WebSocket) ticket for the VM's ESXi host."""
     with _lock:
-        vm = _find_vm_locked(name, moid)
+        vm = _find_vm_locked(name, vm_id)
         if vm.runtime.powerState != "poweredOn":
             raise RuntimeError("The VM is not powered on")
         t = vm.AcquireTicket("webmks")
     url = urlsplit(t.url or "")
     return ConsoleTicket(host=t.host or url.hostname, port=t.port or url.port or 443,
                          path=url.path or f"/ticket/{t.ticket}", thumbprint=t.sslThumbprint or "")
+
+
+# --- OpenTofu (terraform/vm, the vmware/vsphere provider) ---------------------------------
+
+TF_RESOURCE = ("vsphere_virtual_machine", "this")
+TF_PROVIDER = "registry.opentofu.org/vmware/vsphere"
+TF_LEGACY_PROVIDER = "registry.terraform.io/vmware/vsphere"   # in state written by Terraform
+# Connection settings always come from the current settings (tf_env), so a changed vCenter
+# or password never leaves a VM planning with the old connection. tfvars.json beats
+# TF_VAR_*, so they must not be in it.
+TF_CONNECTION_VARS = ("vsphere_server", "vsphere_user", "vsphere_insecure")
+TF_SECRET_VARS = ("vsphere_password",)
+TF_PLACEMENT_VARS = ("datacenter", "cluster", "datastore", "network", "folder")
+TF_FACTS = ("guest_id", "scsi_type", "firmware", "adapter_type", "uuid")
+# Attributes a resize may change. Anything else in the plan (a manual change in vCenter
+# that the plan would revert, a replacement) stops the job before it touches the VM.
+TF_RESIZABLE = {("num_cpus",), ("memory",), ("disk", 0, "size")}
+# Attributes the provider recomputes on any update; they may show as unknown.
+TF_RECOMPUTED = {"change_version", "reboot_required", "imported", "default_ip_address", "guest_ip_addresses",
+                 "vmx_path", "moid", "power_state", "uuid", "vapp_transport"}
+# Attributes that may go from unset in older state to the provider's default.
+TF_DEFAULTED = {"swap_placement_policy": "inherit"}
+
+
+def tf_module_dir() -> Path:
+    return get_settings().terraform_module_dir
+
+
+def tf_env() -> dict[str, str]:
+    s = get_settings()
+    return {
+        "TF_VAR_vsphere_server": s.vsphere_server,
+        "TF_VAR_vsphere_user": s.vsphere_user,
+        "TF_VAR_vsphere_password": s.vsphere_password,
+        "TF_VAR_vsphere_insecure": "true" if s.vsphere_insecure else "false",
+    }
+
+
+def tf_placement() -> dict[str, str]:
+    s = get_settings()
+    return {
+        "datacenter": s.vsphere_datacenter,
+        "cluster": s.vsphere_cluster,
+        "datastore": s.vsphere_datastore,
+        "network": s.vsphere_network,
+        "folder": s.vsphere_folder,
+    }
+
+
+def tf_template_facts(values: dict | None) -> dict | None:
+    try:
+        return {"guest_id": values["guest_id"], "scsi_type": values["scsi_type"], "firmware": values["firmware"],
+                "adapter_type": values["network_interface"][0]["adapter_type"],
+                "uuid": values["clone"][0]["template_uuid"]}
+    except (TypeError, KeyError, IndexError):
+        return None
+
+
+def tf_size(values: dict | None) -> dict | None:
+    try:
+        return {"cpus": int(values["num_cpus"]), "memory_mb": int(values["memory"]),
+                "disk_gb": int(values["disk"][0]["size"])}
+    except (TypeError, KeyError, IndexError, ValueError):
+        return None
+
+
+def state_vm_id(state: dict) -> str | None:
+    """The VM's managed object id (moid) in its OpenTofu state."""
+    for r in state.get("resources") or []:
+        if (r.get("type"), r.get("name")) == TF_RESOURCE and r.get("mode") != "data":
+            for inst in r.get("instances") or []:
+                moid = (inst.get("attributes") or {}).get("moid")
+                if isinstance(moid, str) and moid:
+                    return moid
+    return None
+
+
+# --- Packer (vsphere-iso) -----------------------------------------------------------------
+
+def packer_vars() -> dict[str, str]:
+    s = get_settings()
+    return {
+        "PKR_VAR_vsphere_server": s.vsphere_server,
+        "PKR_VAR_vsphere_user": s.vsphere_user,
+        "PKR_VAR_vsphere_password": s.vsphere_password,
+        "PKR_VAR_vsphere_insecure": "true" if s.vsphere_insecure else "false",
+        "PKR_VAR_vsphere_datacenter": s.vsphere_datacenter,
+        "PKR_VAR_vsphere_cluster": s.vsphere_cluster,
+        "PKR_VAR_vsphere_datastore": s.vsphere_datastore,
+        "PKR_VAR_vsphere_network": s.vsphere_network,
+        "PKR_VAR_vsphere_folder": s.vsphere_folder,
+    }
+
+
+def api_host() -> str:
+    server = get_settings().vsphere_server
+    return server.rsplit(":", 1)[0] if server.count(":") == 1 else server
+
+
+# --- backups ------------------------------------------------------------------------------
+
+VM_ID_RE = re.compile(r"^vm-[0-9]{1,12}$")
+# What the portal's module leaves in state beside the VM, and nothing else.
+STATE_DATA = {("vsphere_datacenter", "this"), ("vsphere_compute_cluster", "this"), ("vsphere_datastore", "this"),
+              ("vsphere_network", "this"), ("vsphere_virtual_machine", "template")}
+
+
+def import_problems(vm_id: str, name: str, tfvars: dict) -> list[str]:
+    """Confirm the id belongs to that very VM, inside this portal's datacenter (and folder),
+    and that vm-portal created it. Otherwise importing the state would hand the portal, and
+    a later destroy, some other VM."""
+    s = get_settings()
+    try:
+        facts = vm_facts(vm_id)
+    except Exception as e:  # noqa: BLE001 - shown in the preview
+        return [f"Couldn't check vCenter: {e}"]
+    if facts is None:
+        return [f"vCenter has no VM with id {vm_id}"]
+    problems = []
+    if facts["name"] != name:
+        problems.append(f"In vCenter, {vm_id} is a VM named {facts['name']!r}")
+    if facts["template"]:
+        problems.append(f"{vm_id} is a template")
+    if facts["datacenter"] != s.vsphere_datacenter:
+        problems.append(f"It's in datacenter {facts['datacenter']!r}, not the portal's {s.vsphere_datacenter!r}")
+    folder = s.vsphere_folder.strip("/")
+    if folder and facts["folder"] != folder and not facts["folder"].startswith(folder + "/"):
+        problems.append(f"It's in folder {facts['folder'] or '(root)'!r}, outside the portal's {folder!r}")
+    if not facts["annotation"].startswith(CREATED_BY):
+        problems.append("vm-portal didn't create it (its vCenter notes don't say so)")
+    if tfvars.get("datacenter") not in (None, s.vsphere_datacenter):
+        problems.append("Its variables name another datacenter than the portal's")
+    return problems

@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(autouse=True)
 def no_vcenter(monkeypatch):
-    from app import vsphere
+    from app.platforms import vsphere
 
     async def no_delay():
         return None
@@ -239,7 +239,7 @@ INV = {"about": "VMware vCenter <b>9</b>", "datacenters": [
 
 @pytest.fixture
 def fake_inventory(monkeypatch):
-    from app import vsphere
+    from app.platforms import vsphere
     seen = {}
 
     def fake(server, user, password, insecure, fresh=False):
@@ -296,7 +296,7 @@ def test_env_password_is_never_sent_to_another_server(fake_inventory, monkeypatc
 
 
 def test_placement_flags_missing_and_falls_back(fake_inventory, monkeypatch):
-    from app import vsphere
+    from app.platforms import vsphere
     with client() as c:
         login(c)
         base = {"csrf_token": csrf(c, "/settings/vcenter"), "vsphere_server": "vc.lab", "vsphere_user": "u",
@@ -385,7 +385,7 @@ def test_invalid_stored_setting_is_ignored():
 
 
 def test_iso_picker(monkeypatch):
-    from app import vsphere
+    from app.platforms import vsphere
     monkeypatch.setattr(vsphere, "list_isos", lambda: ["[ds1] ISO/ubuntu.iso"])
     with client() as c:
         login(c)
@@ -395,7 +395,8 @@ def test_iso_picker(monkeypatch):
 
 def test_create_fails_closed_when_templates_cannot_be_listed(monkeypatch):
     # Without the list, `template` could name any VM in vCenter and Terraform would clone it.
-    from app import provision, vsphere
+    from app import provision
+    from app.platforms import vsphere
     monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
 
     def down():

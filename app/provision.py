@@ -13,11 +13,11 @@ import yaml
 
 from . import config, db, guests, jobs
 from .config import get_settings
+from .platforms import current as platform
+from .platforms.base import CREATED_BY
 
 # OpenTofu (MPL-2.0) in the image; plain Terraform also works for local development.
 TOFU = os.environ.get("IAC_BINARY") or ("tofu" if shutil.which("tofu") else "terraform")
-LEGACY_PROVIDER = "registry.terraform.io/vmware/vsphere"   # in state written by Terraform
-TOFU_PROVIDER = "registry.opentofu.org/vmware/vsphere"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")
 SSH_KEY_RE = config.SSH_KEY_RE
@@ -95,20 +95,13 @@ def render_userdata(req: VMRequest) -> str:
     return guests.get(req.guest).tfvars(req)["userdata"]
 
 
-# vCenter connection variables. They always come from the current settings through the
-# environment, never from a VM's tfvars file: values written there at create time would
-# outlive a later change (TLS verification turned on, a new server) and pair the current
-# password with the old connection. tfvars.json beats TF_VAR_*, so they must not be in it.
-CONNECTION_VARS = ("vsphere_server", "vsphere_user", "vsphere_insecure")
-
-
 def tf_env() -> dict[str, str]:
-    s = get_settings()
+    """The platform's connection variables, plus what every run gets. Connection settings
+    always come from the current settings through the environment, never from a VM's tfvars
+    file: values written there at create time would outlive a later change (TLS verification
+    turned on, a new server) and pair the current password with the old connection."""
     return {
-        "TF_VAR_vsphere_server": s.vsphere_server,
-        "TF_VAR_vsphere_user": s.vsphere_user,
-        "TF_VAR_vsphere_password": s.vsphere_password,
-        "TF_VAR_vsphere_insecure": "true" if s.vsphere_insecure else "false",
+        **platform().tf_env(),
         "TF_IN_AUTOMATION": "1",
         "TF_INPUT": "0",
         "CHECKPOINT_DISABLE": "1",
@@ -120,20 +113,15 @@ def vm_dir(name: str) -> Path:
 
 
 def tfvars(req: VMRequest) -> dict:
-    s = get_settings()
     return {
-        "datacenter": s.vsphere_datacenter,
-        "cluster": s.vsphere_cluster,
-        "datastore": s.vsphere_datastore,
-        "network": s.vsphere_network,
-        "folder": s.vsphere_folder,
+        **platform().tf_placement(),
         "template": req.template,
         "name": req.name,
         "cpus": req.cpus,
         "memory_mb": req.memory_mb,
         "disk_gb": req.disk_gb,
         **guests.get(req.guest).tfvars(req),
-        "annotation": f"Created by vm-portal from {req.template}",
+        "annotation": f"{CREATED_BY} from {req.template}",
     }
 
 
@@ -152,7 +140,7 @@ def create(req: VMRequest, owner_id: int | None = None) -> int:
     )
 
     async def run(job_id: int, log: jobs.JobLog) -> None:
-        tf_module = get_settings().terraform_module_dir
+        tf_module = platform().tf_module_dir()
         log.step(f"Preparing Terraform workspace {d}")
         d.mkdir(parents=True)
         await log.run([TOFU, "init", "-no-color", "-input=false", f"-from-module={tf_module}"], cwd=d, env=tf_env())
@@ -184,10 +172,9 @@ HOST_AUTOSTART_OFF = ("Host {host} has autostart turned off, so the VM won't sta
 async def enable_autostart(name: str, log: jobs.JobLog) -> None:
     """Add a new VM to its host's startup list. A failure only warns: the VM itself is
     fine, and its page offers to try again."""
-    from . import vsphere
     log.step("Turning on autostart")
     try:
-        st = await asyncio.to_thread(vsphere.set_autostart, name, vm_moid(name), True)
+        st = await asyncio.to_thread(platform().set_autostart, name, vm_moid(name), True)
     except Exception as e:  # noqa: BLE001 - reported in the log, never fails the job
         log.write(f"Warning: couldn't turn on autostart ({e}). Try again from the VM page.\n")
         return
@@ -282,18 +269,13 @@ def write_private(path: Path, data: bytes) -> None:
 
 
 def vm_moid(name: str) -> str | None:
-    """The VM's vCenter managed object id, from its Terraform state (None if unknown)."""
+    """The VM's id on the platform (vCenter's managed object id), from its OpenTofu state
+    (None if unknown)."""
     try:
         state = json.loads((vm_dir(name) / "terraform.tfstate").read_text())
     except (OSError, ValueError):
         return None
-    for r in state.get("resources") or []:
-        if r.get("type") == "vsphere_virtual_machine" and r.get("name") == "this" and r.get("mode") != "data":
-            for inst in r.get("instances") or []:
-                moid = (inst.get("attributes") or {}).get("moid")
-                if isinstance(moid, str) and moid:
-                    return moid
-    return None
+    return platform().state_vm_id(state) if isinstance(state, dict) else None
 
 
 async def prepare_workspace(d: Path, log: jobs.JobLog) -> None:
@@ -302,17 +284,18 @@ async def prepare_workspace(d: Path, log: jobs.JobLog) -> None:
     The directory may come from an older portal (older module copy, Terraform instead of
     OpenTofu), and the VM's template may have been pruned since it was cloned.
     """
-    module = get_settings().terraform_module_dir
-    for f in module.glob("*.tf"):
+    pf = platform()
+    for f in pf.tf_module_dir().glob("*.tf"):
         shutil.copyfile(f, d / f.name)
     # Older portals wrote the connection settings into tfvars; drop them so the current
     # ones (from tf_env) apply.
-    update_tfvars(d, _drop=CONNECTION_VARS)
+    update_tfvars(d, _drop=pf.TF_CONNECTION_VARS)
     await log.run([TOFU, "init", "-no-color", "-input=false", "-upgrade"], cwd=d, env=tf_env())
-    if TOFU.endswith("tofu") and LEGACY_PROVIDER in (d / "terraform.tfstate").read_text():
+    legacy = pf.TF_LEGACY_PROVIDER
+    if TOFU.endswith("tofu") and legacy and legacy in (d / "terraform.tfstate").read_text():
         log.step("Moving Terraform-era state to the OpenTofu provider address (backup kept)")
         await log.run([TOFU, "state", "replace-provider", "-no-color", "-auto-approve",
-                       LEGACY_PROVIDER, TOFU_PROVIDER], cwd=d, env=tf_env())
+                       legacy, pf.TF_PROVIDER], cwd=d, env=tf_env())
     facts = template_facts(await _show_json(d))
     if facts:
         update_tfvars(d, template_facts=facts)
@@ -323,27 +306,21 @@ async def prepare_workspace(d: Path, log: jobs.JobLog) -> None:
 def _vm_resource(show: dict) -> dict | None:
     """The VM's attributes from `tofu show -json` of the state."""
     for r in (show.get("values") or {}).get("root_module", {}).get("resources", []):
-        if r.get("address") == "vsphere_virtual_machine.this":
+        if r.get("address") == _vm_address():
             return r.get("values") or {}
     return None
 
 
+def _vm_address() -> str:
+    return ".".join(platform().TF_RESOURCE)
+
+
 def template_facts(show: dict) -> dict | None:
-    vm = _vm_resource(show)
-    try:
-        return {"guest_id": vm["guest_id"], "scsi_type": vm["scsi_type"], "firmware": vm["firmware"],
-                "adapter_type": vm["network_interface"][0]["adapter_type"],
-                "uuid": vm["clone"][0]["template_uuid"]}
-    except (TypeError, KeyError, IndexError):
-        return None
+    return platform().tf_template_facts(_vm_resource(show))
 
 
 def actual_size(show: dict) -> dict | None:
-    vm = _vm_resource(show)
-    try:
-        return {"cpus": int(vm["num_cpus"]), "memory_mb": int(vm["memory"]), "disk_gb": int(vm["disk"][0]["size"])}
-    except (TypeError, KeyError, IndexError, ValueError):
-        return None
+    return platform().tf_size(_vm_resource(show))
 
 
 def update_tfvars(d: Path, _drop: tuple[str, ...] = (), **values) -> None:
@@ -358,16 +335,6 @@ def update_tfvars(d: Path, _drop: tuple[str, ...] = (), **values) -> None:
     tmp.touch(mode=0o600)
     tmp.write_text(json.dumps(data, indent=2))
     tmp.replace(path)
-
-
-# Attributes a resize may change. Anything else in the plan (a manual change in vCenter
-# that the plan would revert, a replacement) stops the job before it touches the VM.
-RESIZABLE = {("num_cpus",), ("memory",), ("disk", 0, "size")}
-# Attributes the provider recomputes on any update; they may show as unknown.
-RECOMPUTED = {"change_version", "reboot_required", "imported", "default_ip_address", "guest_ip_addresses",
-              "vmx_path", "moid", "power_state", "uuid", "vapp_transport"}
-# Attributes that may go from unset in older state to the provider's default.
-DEFAULTED = {"swap_placement_policy": "inherit"}
 
 
 def _diff(before, after, unknown, path=()):
@@ -388,21 +355,26 @@ def _diff(before, after, unknown, path=()):
 
 
 def check_resize_plan(plan: dict) -> list[str]:
-    """Problems that make a plan more than an in-place resize of this VM (empty = safe)."""
+    """Problems that make a plan more than an in-place resize of this VM (empty = safe).
+
+    A resize may only change the attributes the platform lists (TF_RESIZABLE). Anything else
+    in the plan (a manual change on the platform that the plan would revert, a replacement)
+    stops the job before it touches the VM."""
+    pf = platform()
     problems = []
     for rc in plan.get("resource_changes", []):
         actions = rc.get("change", {}).get("actions", [])
         if actions in (["no-op"], ["read"]):
             continue
-        if rc.get("address") != "vsphere_virtual_machine.this" or actions != ["update"]:
+        if rc.get("address") != _vm_address() or actions != ["update"]:
             problems.append(f"{rc.get('address')}: {'/'.join(actions)}")
             continue
         ch = rc["change"]
         before, after = ch.get("before") or {}, ch.get("after") or {}
         for path in _diff(before, after, ch.get("after_unknown")):
-            if path in RESIZABLE or (len(path) == 1 and path[0] in RECOMPUTED):
+            if path in pf.TF_RESIZABLE or (len(path) == 1 and path[0] in pf.TF_RECOMPUTED):
                 continue
-            if len(path) == 1 and not before.get(path[0]) and DEFAULTED.get(path[0]) == after.get(path[0]):
+            if len(path) == 1 and not before.get(path[0]) and pf.TF_DEFAULTED.get(path[0]) == after.get(path[0]):
                 continue
             problems.append("would change " + ".".join(map(str, path)))
     return problems
@@ -423,11 +395,10 @@ def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, use
     target = {"cpus": cpus, "memory_mb": memory_mb, "disk_gb": disk_gb}
 
     async def run(job_id: int, log: jobs.JobLog) -> None:
-        from . import vsphere
         changes = ", ".join(f"{k} {vm[k]} -> {v}" for k, v in target.items() if vm[k] != v)
         log.step(f"Resizing {vm['name']}: {changes}")
         if needs_off and not restart:
-            info = (await asyncio.to_thread(vsphere.vms_by_name, True)).get(vm["name"])
+            info = (await asyncio.to_thread(platform().vms_by_name, True)).get(vm["name"])
             if info is None or info.power_state != "poweredOff":
                 raise jobs.JobFailed("Changing vCPUs or memory restarts the VM, and no restart was allowed")
         keep_state_history(d)

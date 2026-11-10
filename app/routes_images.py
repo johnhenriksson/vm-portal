@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import ValidationError
 
-from . import db, images, packer, vsphere
+from . import db, images, packer
 from .auth import client_ip, require_admin
+from .platforms import current as platform
 
 log = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -57,7 +58,7 @@ def _last_builds(limit: int = 20, target_prefix: str | None = None) -> list[dict
 
 @router.get("/images")
 async def images_page(request: Request, tab: str = "templates"):
-    tmpls, err = await vcenter(vsphere.templates)
+    tmpls, err = await vcenter(platform().templates)
     catalog = images.catalog()
     defs = []
     for img in catalog:
@@ -72,7 +73,7 @@ async def images_page(request: Request, tab: str = "templates"):
 
 @router.post("/images/templates/{name}/delete")
 async def template_delete(request: Request, name: str, user: dict = Depends(require_admin)):
-    tmpls, err = await vcenter(vsphere.templates)
+    tmpls, err = await vcenter(platform().templates)
     if err or tmpls is None:
         raise HTTPException(502, err or "vCenter is not configured")
     group = next((g for g in group_templates(tmpls) if any(t.name == name for t in g["templates"])), None)
@@ -80,7 +81,7 @@ async def template_delete(request: Request, name: str, user: dict = Depends(requ
         raise HTTPException(404, "Unknown template")
     if group["templates"][0].name == name:
         raise HTTPException(400, "Refusing to delete the newest template of an image")
-    _, err = await vcenter(vsphere.delete_template, name)
+    _, err = await vcenter(platform().delete_template, name)
     if err:
         raise HTTPException(502, err)
     _audit(request, user, "image.template_deleted", name)
@@ -153,7 +154,7 @@ async def image_isos(request: Request, image_id: str):
     value = cfg.iso_url if cfg else ""
     isos, error = None, None
     try:
-        isos = await asyncio.wait_for(asyncio.to_thread(vsphere.list_isos), timeout=90)
+        isos = await asyncio.wait_for(asyncio.to_thread(platform().list_isos), timeout=90)
     except Exception as e:  # noqa: BLE001 - shown next to a plain text field
         error = getattr(e, "msg", None) or str(e)
     if isos and not value and img.usable and img.manifest.iso.match:

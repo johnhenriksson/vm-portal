@@ -108,7 +108,7 @@ def test_size_limits(editing, data_dir):
 
 
 def test_create_vm_respects_image_features(data_dir, monkeypatch):
-    from app import vsphere
+    from app.platforms import vsphere
     make_custom(data_dir, features=[])
     t = vsphere.VMInfo("acme-1-20261105-1200", True)
     monkeypatch.setattr(vsphere, "templates", lambda: [t])

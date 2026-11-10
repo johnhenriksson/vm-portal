@@ -81,7 +81,8 @@ os.environ.update({
     "ALLOW_IMAGE_EDITING": "true",
 })
 
-from app import db, images, ipam, jobs, users, vsphere  # noqa: E402
+from app import db, images, ipam, jobs, users  # noqa: E402
+from app.platforms import vsphere  # noqa: E402
 from app.backup import schedule  # noqa: E402
 from app.config import get_bootstrap, get_settings  # noqa: E402
 

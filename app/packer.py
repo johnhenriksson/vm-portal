@@ -10,8 +10,9 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from . import images, jobs, vsphere
+from . import images, jobs
 from .config import get_settings, vcenter_configured
+from .platforms import current as platform
 
 LOCK_PREFIX = "packer:"
 MAX_PARALLEL_BUILDS = 2
@@ -79,7 +80,7 @@ def http_ip() -> str:
     s = get_settings()
     if s.packer_http_ip:
         return s.packer_http_ip
-    host = s.vsphere_server.rsplit(":", 1)[0] if s.vsphere_server.count(":") == 1 else s.vsphere_server
+    host = platform().api_host()
     try:
         addr = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -97,15 +98,7 @@ def packer_env(img: images.ImageDef, cfg: images.ImageConfig, template_name: str
     """
     s = get_settings()
     env = {
-        "PKR_VAR_vsphere_server": s.vsphere_server,
-        "PKR_VAR_vsphere_user": s.vsphere_user,
-        "PKR_VAR_vsphere_password": s.vsphere_password,
-        "PKR_VAR_vsphere_insecure": "true" if s.vsphere_insecure else "false",
-        "PKR_VAR_vsphere_datacenter": s.vsphere_datacenter,
-        "PKR_VAR_vsphere_cluster": s.vsphere_cluster,
-        "PKR_VAR_vsphere_datastore": s.vsphere_datastore,
-        "PKR_VAR_vsphere_network": s.vsphere_network,
-        "PKR_VAR_vsphere_folder": s.vsphere_folder,
+        **platform().packer_vars(),
         "PKR_VAR_vm_name": template_name,
         "PKR_VAR_template_prefix": img.manifest.template_prefix,
         "PKR_VAR_vm_cpu_num": str(cfg.cpus),
@@ -203,12 +196,12 @@ def start_build(img: images.ImageDef, user_id: int | None = None) -> int:
                 shutil.rmtree(work, ignore_errors=True)
 
         log.step(f"Pruning {prefix}-* templates (keeping the newest {cfg.keep})")
-        ts = await asyncio.to_thread(vsphere.templates)
+        ts = await asyncio.to_thread(platform().templates)
         mine = [t.name for t in ts if images.for_template(t.name) is not None
                 and images.for_template(t.name).id == img.id]
         for old in prune_candidates(mine, cfg.keep):
             log.write(f"Deleting old template {old}\n")
-            await asyncio.to_thread(vsphere.delete_template, old)
+            await asyncio.to_thread(platform().delete_template, old)
         if not prune_candidates(mine, cfg.keep):
             log.write("Nothing to prune\n")
 

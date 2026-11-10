@@ -65,7 +65,8 @@ def esxi(tmp_path):
 
 @pytest.fixture
 def setup(monkeypatch, esxi):
-    from app import db, users, vsphere
+    from app import db, users
+    from app.platforms import vsphere
     monkeypatch.setattr("app.main.login_failed_delay", lambda: asyncio.sleep(0))
     monkeypatch.setattr("app.console.vcenter_configured", lambda: True)
     ticket = vsphere.ConsoleTicket(host="127.0.0.1", port=esxi["port"], path="/ticket/secret-ticket",
@@ -131,7 +132,7 @@ def test_console_refuses_wrong_thumbprint(setup):
 
 
 def test_console_button_only_for_running_vms(setup, monkeypatch):
-    from app import vsphere
+    from app.platforms import vsphere
     c, _ = setup
     login(c, "alice", "purple-otter-41")
     on = vsphere.VMInfo("alice-vm", False, "poweredOn", "10.0.0.5")

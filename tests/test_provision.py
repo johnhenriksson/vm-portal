@@ -2,6 +2,7 @@ import pytest
 import yaml
 
 from app import provision
+from app.platforms import current as platform
 from app.provision import VMRequest
 
 
@@ -70,9 +71,9 @@ def test_tfvars_has_no_password():
 
 def test_connection_settings_come_from_env_not_tfvars():
     # tfvars.json overrides TF_VAR_*, so a value frozen there would outlive a settings change.
-    assert not set(provision.CONNECTION_VARS) & provision.tfvars(req()).keys()
+    assert not set(platform().TF_CONNECTION_VARS) & provision.tfvars(req()).keys()
     env = provision.tf_env()
-    for k in provision.CONNECTION_VARS:
+    for k in platform().TF_CONNECTION_VARS:
         assert f"TF_VAR_{k}" in env
     assert env["TF_VAR_vsphere_insecure"] in ("true", "false")
 
@@ -81,7 +82,7 @@ def test_update_tfvars_can_drop_keys(tmp_path):
     import json
     (tmp_path / "terraform.tfvars.json").write_text(json.dumps(
         {"vsphere_server": "old", "vsphere_insecure": True, "userdata": "keep"}))
-    provision.update_tfvars(tmp_path, _drop=provision.CONNECTION_VARS)
+    provision.update_tfvars(tmp_path, _drop=platform().TF_CONNECTION_VARS)
     assert json.loads((tmp_path / "terraform.tfvars.json").read_text()) == {"userdata": "keep"}
 
 
@@ -138,7 +139,7 @@ def test_vm_moid_from_terraform_state(data_dir):
 
 def test_power_and_console_target_the_recorded_vm(monkeypatch):
     import pytest
-    from app import vsphere
+    from app.platforms import vsphere
 
     class FakeVM:
         def __init__(self, moid, stub):

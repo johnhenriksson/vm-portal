@@ -14,7 +14,7 @@ ADMIN_PW = "test-password-123"
 
 @pytest.fixture(autouse=True)
 def fakes(monkeypatch):
-    from app import vsphere
+    from app.platforms import vsphere
 
     async def no_delay():
         return None

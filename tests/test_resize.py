@@ -6,7 +6,8 @@ import textwrap
 
 import pytest
 
-from app import db, jobs, provision, vsphere
+from app import db, jobs, provision
+from app.platforms import vsphere
 from tests.test_web import client, csrf, login
 
 VM_VALUES = {

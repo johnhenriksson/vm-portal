@@ -12,7 +12,7 @@ from backup_helpers import PROVIDER, admin, good_facts, make_vm, state, tfvars  
 @pytest.fixture
 def vcenter(monkeypatch):
     facts = {"vm-42": good_facts()}
-    from app import vsphere
+    from app.platforms import vsphere
     monkeypatch.setattr(vsphere, "vm_facts", lambda moid: facts.get(moid))
     return facts
 

@@ -7,13 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import db, jobs, provision, users
-from ..config import get_bootstrap, get_settings
+from ..config import get_bootstrap
 from .archive import Backup, BackupError
 from .checks import check_state, check_tfvars
 from .collect import vm_entries
 
 log = logging.getLogger(__name__)
-ANNOTATION_PREFIX = "Created by vm-portal"
 
 
 # --- VM state import ---------------------------------------------------------------------
@@ -82,32 +81,10 @@ def check_vcenter(imports: list[VmImport]) -> None:
     """Blocking: confirm each VM's id belongs to that very VM, inside this portal's datacenter
     (and folder), and that vm-portal created it. Otherwise importing the state would hand the
     portal, and a later destroy, some other VM."""
-    from .. import vsphere
-    s = get_settings()
+    from ..platforms import current as platform
     for imp in imports:
-        if imp.problems:
-            continue
-        try:
-            facts = vsphere.vm_facts(imp.moid)
-        except Exception as e:  # noqa: BLE001 - shown in the preview
-            imp.problems.append(f"Couldn't check vCenter: {e}")
-            continue
-        if facts is None:
-            imp.problems.append(f"vCenter has no VM with id {imp.moid}")
-            continue
-        if facts["name"] != imp.name:
-            imp.problems.append(f"In vCenter, {imp.moid} is a VM named {facts['name']!r}")
-        if facts["template"]:
-            imp.problems.append(f"{imp.moid} is a template")
-        if facts["datacenter"] != s.vsphere_datacenter:
-            imp.problems.append(f"It's in datacenter {facts['datacenter']!r}, not the portal's {s.vsphere_datacenter!r}")
-        folder = s.vsphere_folder.strip("/")
-        if folder and facts["folder"] != folder and not facts["folder"].startswith(folder + "/"):
-            imp.problems.append(f"It's in folder {facts['folder'] or '(root)'!r}, outside the portal's {folder!r}")
-        if not facts["annotation"].startswith(ANNOTATION_PREFIX):
-            imp.problems.append("vm-portal didn't create it (its vCenter notes don't say so)")
-        if imp.tfvars.get("datacenter") not in (None, s.vsphere_datacenter):
-            imp.problems.append("Its variables name another datacenter than the portal's")
+        if not imp.problems:
+            imp.problems.extend(platform().import_problems(imp.moid, imp.name, imp.tfvars))
 
 
 def import_vms(imports: list[VmImport], names: list[str], user: dict, source: str) -> list[str]:
@@ -416,14 +393,15 @@ def _build_staging(plan: FullRestore, by: str) -> Path:
 def apply_full_restore(plan: FullRestore, by: str) -> None:
     """Replace this portal's data with the backup's. Callers stop jobs and requests first
     (jobs.paused). The current data is kept in DATA_DIR/.pre-restore until the next restore."""
-    from .. import auth, config, vsphere
+    from .. import auth, config
+    from ..platforms import current as platform
     b = get_bootstrap()
     staging = _build_staging(plan, by)
     pre = b.data_dir / PRE_RESTORE
     shutil.rmtree(pre, ignore_errors=True)
     pre.mkdir(mode=0o700)
     db.close()
-    vsphere.close()
+    platform().close()
     moved, placed = [], []
     try:
         for item in SWAPPED:

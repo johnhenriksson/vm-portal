@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 from pyVmomi import vim
 
-from app import db, provision, users, vsphere
+from app import db, provision, users
+from app.platforms import vsphere
 from app.backup import checks
 
 from backup_helpers import admin, make_vm

@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import db, vsphere
+from . import db
+from .platforms import current as platform
 from .config import get_settings
 
 log = logging.getLogger(__name__)
@@ -151,7 +152,7 @@ class ScanIPAM:
             s = get_settings()
             candidates = [str(i) for i in pool()]
             try:
-                vcenter = await asyncio.to_thread(vsphere.used_ips)
+                vcenter = await asyncio.to_thread(platform().used_ips)
             except Exception:  # noqa: BLE001 - scanning still works without vCenter data
                 log.exception("could not read VM IPs from vCenter")
                 vcenter = set()
@@ -174,7 +175,7 @@ class ScanIPAM:
         if ip in db.reserved_ips():
             return "assigned by portal"
         try:
-            if ip in await asyncio.to_thread(vsphere.used_ips):
+            if ip in await asyncio.to_thread(platform().used_ips):
                 return "in use by a vCenter VM"
         except Exception:  # noqa: BLE001
             log.exception("could not read VM IPs from vCenter")

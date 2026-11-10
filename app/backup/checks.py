@@ -15,26 +15,19 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ..config import CONTROL_RE, LINUX_USER_RE
+from ..platforms import current as platform
 from .archive import BackupError
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")   # provision.NAME_RE
 IMAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,47}$")    # images.ID_RE
-MOID_RE = re.compile(r"^vm-[0-9]{1,12}$")
 MAX_STATE = 16 * 1024 * 1024
 
-# What the portal's own module (terraform/vm) puts in state, and nothing else.
-STATE_MANAGED = ("vsphere_virtual_machine", "this")
-STATE_DATA = {("vsphere_datacenter", "this"), ("vsphere_compute_cluster", "this"), ("vsphere_datastore", "this"),
-              ("vsphere_network", "this"), ("vsphere_virtual_machine", "template")}
-PROVIDERS = {'provider["registry.opentofu.org/vmware/vsphere"]',
-             'provider["registry.terraform.io/vmware/vsphere"]'}
-# Variables the portal writes (terraform/vm/variables.tf). Connection settings are dropped:
-# they always come from the current settings.
-TFVARS_STRINGS = {"datacenter", "cluster", "datastore", "network", "folder", "template", "name",
-                  "metadata", "userdata", "annotation"}
+# Variables every platform's module takes for the VM itself (terraform/vm/variables.tf). The
+# platform adds its placement variables; its connection settings are dropped, because they
+# always come from the current settings. What the module may leave in state, the providers
+# and the form of a VM id come from the platform too (platforms/base.py).
+TFVARS_STRINGS = {"template", "name", "metadata", "userdata", "annotation"}
 TFVARS_INTS = {"cpus": (1, 32), "memory_mb": (512, 262144), "disk_gb": (1, 65536)}
-TFVARS_FACTS = {"guest_id", "scsi_type", "firmware", "adapter_type", "uuid"}
-CONNECTION_VARS = {"vsphere_server", "vsphere_user", "vsphere_insecure", "vsphere_password"}
 
 
 def check_state(name: str, data: bytes) -> str:
@@ -47,19 +40,21 @@ def check_state(name: str, data: bytes) -> str:
         raise BackupError(f"{name}: the state file is not valid JSON") from None
     if not isinstance(state, dict) or state.get("version") != 4 or not isinstance(state.get("resources"), list):
         raise BackupError(f"{name}: not an OpenTofu/Terraform state file (version 4)")
+    pf = platform()
+    providers = {f'provider["{a}"]' for a in (pf.TF_PROVIDER, pf.TF_LEGACY_PROVIDER) if a}
     moid = None
     for r in state["resources"]:
         if not isinstance(r, dict) or "module" in r:
             raise BackupError(f"{name}: the state has resources the portal didn't create")
         key, mode = (r.get("type"), r.get("name")), r.get("mode")
-        if r.get("provider") not in PROVIDERS:
+        if r.get("provider") not in providers:
             raise BackupError(f"{name}: the state uses an unexpected provider")
         instances = r.get("instances")
         if not isinstance(instances, list) or len(instances) > 1:
             raise BackupError(f"{name}: unexpected instances in the state")
-        if mode == "data" and key in STATE_DATA:
+        if mode == "data" and key in pf.STATE_DATA:
             continue
-        if mode != "managed" or key != STATE_MANAGED or moid is not None:
+        if mode != "managed" or key != pf.TF_RESOURCE or moid is not None:
             raise BackupError(f"{name}: the state has resources the portal didn't create ({r.get('type')}.{r.get('name')})")
         attrs = (instances[0] if instances else {}).get("attributes") if instances else None
         if not isinstance(attrs, dict):
@@ -67,7 +62,7 @@ def check_state(name: str, data: bytes) -> str:
         if attrs.get("name") != name:
             raise BackupError(f"{name}: the state describes a VM named {str(attrs.get('name'))[:40]!r}")
         moid = attrs.get("moid")
-        if not isinstance(moid, str) or not MOID_RE.match(moid):
+        if not isinstance(moid, str) or not pf.VM_ID_RE.match(moid):
             raise BackupError(f"{name}: the state has no valid vCenter id for the VM")
     if moid is None:
         raise BackupError(f"{name}: the state has no VM in it")
@@ -82,17 +77,18 @@ def check_tfvars(name: str, data: bytes) -> dict:
         raise BackupError(f"{name}: the variables file is not valid JSON") from None
     if not isinstance(tfvars, dict):
         raise BackupError(f"{name}: the variables file is not an object")
+    pf = platform()
     out = {}
     for k, v in tfvars.items():
-        if k in CONNECTION_VARS:
+        if k in pf.TF_CONNECTION_VARS or k in pf.TF_SECRET_VARS:
             continue
-        if k in TFVARS_STRINGS:
+        if k in TFVARS_STRINGS or k in pf.TF_PLACEMENT_VARS:
             ok = isinstance(v, str) and len(v) <= 256 * 1024
         elif k in TFVARS_INTS:
             lo, hi = TFVARS_INTS[k]
             ok = isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
         elif k == "template_facts":
-            ok = (isinstance(v, dict) and set(v) <= TFVARS_FACTS
+            ok = (isinstance(v, dict) and set(v) <= set(pf.TF_FACTS)
                   and all(isinstance(x, str) and len(x) <= 256 and not CONTROL_RE.search(x) for x in v.values()))
         else:
             ok = False

@@ -44,6 +44,12 @@ browser ──► FastAPI + htmx ──► jobs (in-process; logs in /data/jobs)
 - **Guest setup** is done by a *guest driver* chosen by the image: `cloud-init`
   (via VMware guestinfo) for Linux. The interface in `app/guests/` is ready for
   others, such as Windows.
+- **Platform**: everything specific to vSphere (the vCenter API, the OpenTofu
+  provider's resource names, Packer's variables, how an imported VM is checked)
+  is one module, `app/platforms/vsphere.py`, behind the interface in
+  `app/platforms/base.py`. The rest of the portal asks `platforms.current()`.
+  That's where a second platform (Proxmox VE, see the roadmap) goes; the
+  settings pages and the console relay are still vSphere's own.
 - **Image builds** create a new template `<prefix>-YYYYMMDD-HHMM`, so the
   template in use is never touched and a failed build costs nothing. See
   [`images/README.md`](images/README.md) for how definitions work.
@@ -200,7 +206,7 @@ Provisioning and builds also need `tofu` (or `terraform`), `packer` and
 `xorriso` on the PATH. Layout:
 
 ```
-app/            FastAPI app (routes, vSphere, jobs, backup/, guests/, templates/, static/)
+app/            FastAPI app (routes, jobs, backup/, guests/, platforms/, templates/, static/)
 docs/           backup and restore guide
 images/         built-in image definitions (Packer + image.yaml)
 terraform/vm/   the OpenTofu module that clones a VM

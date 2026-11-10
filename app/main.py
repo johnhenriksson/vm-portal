@@ -9,12 +9,13 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import crypto, datalock, db, guests, images, ipam, jobs, provision, users, vsphere
+from . import crypto, datalock, db, guests, images, ipam, jobs, provision, users
 from .auth import (SESSION_MAX_AGE, LoginRequired, client_ip, csrf_field, csrf_protect, current_user,
                    end_session, require_admin, require_user, start_session)
 from .config import APP_DIR, PublicSettings, get_bootstrap, get_settings, vcenter_configured
 from .backup import schedule
 from .links import Links
+from .platforms import current as platform
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("vm-portal")
@@ -31,7 +32,7 @@ async def lifespan(app: FastAPI):
         schedule.start()
         yield
         await schedule.stop()
-        await asyncio.to_thread(vsphere.close)
+        await asyncio.to_thread(platform().close)
     finally:
         datalock.release()
 
@@ -193,7 +194,7 @@ def owned_vms(user: dict) -> list[dict]:
 
 async def vm_rows(user: dict) -> tuple[list[dict], str | None]:
     mine = owned_vms(user)
-    live, err = await vcenter(vsphere.vms_by_name) if mine else ({}, None)
+    live, err = await vcenter(platform().vms_by_name) if mine else ({}, None)
     owners = {u["id"]: u["username"] for u in users.all_users()} if is_admin(user) else {}
     rows = []
     for vm in mine:
@@ -211,7 +212,7 @@ async def vm_rows(user: dict) -> tuple[list[dict], str | None]:
 @app.get("/")
 async def dashboard(request: Request, user: dict = Depends(require_user)):
     vms, err = await vm_rows(user)
-    tmpls, err2 = await vcenter(vsphere.templates)
+    tmpls, err2 = await vcenter(platform().templates)
     from .routes_images import group_templates
     forgotten = request.query_params.get("forgotten", "")
     try:
@@ -262,7 +263,7 @@ def _new_vm_form(tmpls: list) -> dict:
 
 @app.get("/vms/new", dependencies=auth)
 async def vm_new(request: Request):
-    tmpls, err = await vcenter(vsphere.templates)
+    tmpls, err = await vcenter(platform().templates)
     return render(request, "vm_new.html", choices=image_choices(tmpls or []), form=_new_vm_form(tmpls or []),
                   error=err)
 
@@ -286,7 +287,7 @@ async def vm_create(
 ):
     form = dict(name=name, template=template, cpus=cpus, memory_mb=memory_mb, disk_gb=disk_gb,
                 ip_mode=ip_mode, ip=ip, ssh_keys=ssh_keys, compose_yaml=compose_yaml, autostart=autostart == "on")
-    tmpls, tmpls_err = await vcenter(vsphere.templates)
+    tmpls, tmpls_err = await vcenter(platform().templates)
 
     async def fail(msg: str):
         return render(request, "vm_new.html", status_code=400, choices=image_choices(tmpls or []), form=form,
@@ -326,7 +327,7 @@ async def vm_create(
         return await fail("Add at least one SSH key")
     if db.active_vm(name) or jobs.is_locked(f"vm:{name}"):
         return await fail(f"The name {name!r} is already taken")
-    exists, err = await vcenter(vsphere.name_exists, name)
+    exists, err = await vcenter(platform().name_exists, name)
     if err:
         return await fail(err)
     if exists:
@@ -361,13 +362,13 @@ def _vm_or_404(name: str, user: dict) -> dict:
 @app.get("/vms/{name}")
 async def vm_detail(request: Request, name: str, user: dict = Depends(require_user)):
     vm = _vm_or_404(name, user)
-    live, err = await vcenter(vsphere.vms_by_name)
+    live, err = await vcenter(platform().vms_by_name)
     info = (live or {}).get(name)
     # Only jobs for this VM instance (a destroyed VM may have had the same name).
     vm_jobs = db.query("SELECT * FROM jobs WHERE target=? AND kind LIKE 'vm-%' AND created_at >= ?"
                        " ORDER BY id DESC LIMIT 20", (name, vm["created_at"]))
     owner = users.get(vm["owner_id"]) if vm["owner_id"] else None
-    autostart, autostart_err = (await vcenter(vsphere.autostart, name, provision.vm_moid(name))
+    autostart, autostart_err = (await vcenter(platform().autostart, name, provision.vm_moid(name))
                                 if info and vm["status"] == "ready" else (None, None))
     return render(request, "vm_detail.html", vm=vm, info=info, jobs=vm_jobs, error=err,
                   autostart=autostart, autostart_error=autostart_err,
@@ -384,7 +385,7 @@ async def vm_power(request: Request, name: str, action: str, user: dict = Depend
     if action not in ("on", "off", "shutdown", "reboot"):
         raise HTTPException(400, "Unknown action")
     _vm_or_404(name, user)
-    _, err = await vcenter(vsphere.power, name, action, provision.vm_moid(name))
+    _, err = await vcenter(platform().power, name, action, provision.vm_moid(name))
     if err:
         raise HTTPException(502, err)
     db.audit(f"vm.power.{action}", name, username=user["username"], ip=client_ip(request))
@@ -412,7 +413,7 @@ async def vm_resize(
         return RedirectResponse(f"/vms/{name}", status_code=303)
     needs_off = (cpus, memory_mb) != (vm["cpus"], vm["memory_mb"])
     if needs_off and restart != "on":
-        live, err = await vcenter(vsphere.vms_by_name, True)
+        live, err = await vcenter(platform().vms_by_name, True)
         info = (live or {}).get(name)
         if err or not info or info.power_state != "poweredOff":
             raise HTTPException(400, "Changing vCPUs or memory restarts the VM: tick 'Restart the VM'")
@@ -459,7 +460,7 @@ async def vm_autostart(request: Request, name: str, user: dict = Depends(require
     if jobs.is_locked(f"vm:{name}"):
         raise HTTPException(409, "A job is already running for this VM")
     on = enabled == "on"
-    done, err = await vcenter(vsphere.set_autostart, name, provision.vm_moid(name), on)
+    done, err = await vcenter(platform().set_autostart, name, provision.vm_moid(name), on)
     if done is None:
         raise HTTPException(502, err or "vCenter is not configured")
     db.execute("UPDATE vms SET autostart=? WHERE id=?", (int(on), vm["id"]))
