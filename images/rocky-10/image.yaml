@@ -13,6 +13,7 @@ os:
 guest: cloud-init
 features: []
 template_prefix: rocky-10
+platforms: [vsphere, proxmox]   # backend types it has a Packer source for
 login_user_parameter: ssh_username
 network_interface: eth0      # the template uses net.ifnames=0 (see scripts/cleanup.sh)
 build:

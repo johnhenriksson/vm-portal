@@ -6,14 +6,14 @@
   <!-- No scripts, fonts, analytics or anything else from other sites. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; media-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
-  <title>vm-portal: self-service VMs on your own vSphere</title>
-  <meta name="description" content="An open-source, self-hosted portal for VMware vSphere: users create VMs in a few clicks, admins build the templates with Packer from the same web interface. One container, Apache-2.0.">
+  <title>vm-portal: self-service VMs on vSphere and Proxmox VE</title>
+  <meta name="description" content="An open-source, self-hosted portal for VMware vSphere and Proxmox VE: users create VMs in a few clicks, admins build the templates with Packer from the same web interface. One container, Apache-2.0.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#0069ff">
   <!-- Repository links are filled in when the site is deployed (.github/workflows/pages.yml). -->
   <link rel="canonical" href="https://OWNER.github.io/vm-portal/">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="vm-portal: self-service VMs on your own vSphere">
+  <meta property="og:title" content="vm-portal: self-service VMs on vSphere and Proxmox VE">
   <meta property="og:description" content="Users create VMs in a few clicks; admins build the templates with Packer from the same web interface. One container, open source.">
   <meta property="og:url" content="https://OWNER.github.io/vm-portal/">
   <meta property="og:image" content="https://OWNER.github.io/vm-portal/img/og.png">
@@ -45,15 +45,16 @@
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-text">
-        <p class="eyebrow">Open source · Self-hosted · For VMware vSphere</p>
-        <h1>Self-service VMs on your own vSphere</h1>
+        <p class="eyebrow">Open source · Self-hosted · For VMware vSphere and Proxmox VE</p>
+        <h1>Self-service VMs on vSphere and Proxmox VE</h1>
         <p class="lead">Users create VMs in a few clicks. Admins build and maintain the templates with
-          Packer, from the same web interface. It all runs in one container next to your vCenter.</p>
+          Packer, from the same web interface. One container manages your vCenters and Proxmox VE clusters,
+          side by side.</p>
         <div class="cta">
           <a class="btn" href="https://github.com/OWNER/vm-portal">View on GitHub</a>
           <a class="btn btn-outline" href="#quick-start">Quick start</a>
         </div>
-        <p class="fine">Apache-2.0 · Ubuntu 26.04 and Debian 13 templates built in, Rocky Linux 10 as a starter</p>
+        <p class="fine">Apache-2.0 · Ubuntu 26.04, Debian 13 and Rocky Linux 10 templates built in</p>
       </div>
       <a class="hero-shot" href="img/dashboard.webp">
         <img src="img/dashboard.webp" width="1360" height="850"
@@ -65,8 +66,8 @@
   <section id="demo" class="section alt" aria-labelledby="demo-title">
     <div class="wrap">
       <h2 id="demo-title">See it in action</h2>
-      <p class="section-lead">A one-minute tour: create a VM and watch it build, then power, resize and
-        autostart, templates and backups. Recorded from the real portal with made-up data.</p>
+      <p class="section-lead">A one-minute tour: pick a backend, create a VM and watch it build, then power,
+        resize and autostart, templates and backups. Recorded from the real portal with made-up data.</p>
       <video class="demo-video" controls preload="none" playsinline width="1920" height="1080"
              poster="img/vm-portal-wide.jpg">
         <source src="img/vm-portal-wide.mp4" type="video/mp4">
@@ -78,7 +79,7 @@
   <section id="features" class="section">
     <div class="wrap">
       <h2>Why vm-portal</h2>
-      <p class="section-lead">The everyday work of a small vSphere estate, without handing out vCenter access.</p>
+      <p class="section-lead">The everyday work of a small vSphere or Proxmox VE estate, without handing out access to either.</p>
       <div class="cards">
         <article class="card">
           <h3>VMs in a few clicks</h3>
@@ -93,25 +94,26 @@
             browser, with a full <code>packer validate</code> on every save.</p>
         </article>
         <article class="card">
-          <h3>Console without ESXi access</h3>
+          <h3>vSphere and Proxmox VE in one place</h3>
+          <p>Add any number of vCenters and Proxmox VE clusters as backends, each with its own
+            connection, placement and IP pool. Users pick one on the create form; the same image
+            definitions build templates on both.</p>
+        </article>
+        <article class="card">
+          <h3>Console without host access</h3>
           <p>A browser console (noVNC) through the portal, so users never need a route to the ESXi
-            hosts. Optional console password per VM; SSH stays key-only.</p>
+            hosts or Proxmox nodes. Optional console password per VM; SSH stays key-only.</p>
         </article>
         <article class="card">
           <h3>Safe changes to running VMs</h3>
           <p>Every VM has its own OpenTofu state. A resize is applied only if the plan changes nothing
-            but CPUs, memory and disk, so a change someone made by hand in vCenter stops the job instead
+            but CPUs, memory and disk, so a change someone made by hand on the backend stops the job instead
             of being undone. Encrypted backups, on demand or scheduled, bring back the whole portal or
             single VMs.</p>
         </article>
         <article class="card">
-          <h3>Security from the start</h3>
-          <p>Secrets encrypted at rest, a password check before risky settings, an audit log, users who
-            only see their own VMs, child processes without the portal's secrets.</p>
-        </article>
-        <article class="card">
           <h3>One container</h3>
-          <p>SQLite, OpenTofu, Packer and the vSphere plugins are inside, verified when the image is
+          <p>SQLite, OpenTofu, Packer and the vSphere and Proxmox plugins are inside, verified when the image is
             built, so jobs never download tools. No database server, no message queue, no cloud
             account.</p>
         </article>
@@ -124,14 +126,16 @@
       <h2 id="how">How it works</h2>
       <ol class="flow">
         <li><span class="step">1</span><strong>Packer builds a template</strong>
-          <span>from the installer ISO on your datastore: Ubuntu autoinstall, Debian preseed or a Rocky
-            kickstart, plus Docker, open-vm-tools and cloud-init.</span></li>
+          <span>from the installer ISO on your datastore or ISO storage: Ubuntu autoinstall, Debian
+            preseed or a Rocky kickstart, plus Docker, the guest tools and cloud-init.</span></li>
         <li><span class="step">2</span><strong>OpenTofu clones it</strong>
-          <span>with the size you chose, into your cluster, datastore, network and folder. Each VM keeps
-            its own state, so later changes and the final destroy are exact.</span></li>
+          <span>with the size you chose, to where the backend's settings say: cluster, datastore and
+            network on vSphere; node, storage and bridge on Proxmox VE. Each VM keeps its own state, so
+            later changes and the final destroy are exact.</span></li>
         <li><span class="step">3</span><strong>cloud-init sets it up</strong>
-          <span>on first boot from VMware guestinfo: hostname, network, SSH keys and your Compose app.
-            The data is wiped from vCenter once it's been read.</span></li>
+          <span>on first boot: hostname, network, SSH keys and your Compose app. The data arrives as
+            VMware guestinfo or on a small seed ISO on Proxmox VE, and its secrets are removed once
+            it's been read.</span></li>
       </ol>
     </div>
   </section>
@@ -143,8 +147,18 @@
       <div class="gallery">
         <figure>
           <a href="img/create-vm.webp"><img src="img/create-vm.webp" width="1360" height="850" loading="lazy"
-             alt="Create virtual machine: image cards, sliders for vCPUs, memory and disk, and a summary panel"></a>
-          <figcaption><strong>Create a VM.</strong> Image, size, network and access on one page.</figcaption>
+             alt="Create virtual machine on a Proxmox VE cluster: backend and node dropdowns, image cards and a summary panel"></a>
+          <figcaption><strong>Create a VM.</strong> Backend, image, size, network and access on one page.</figcaption>
+        </figure>
+        <figure>
+          <a href="img/backends.webp"><img src="img/backends.webp" width="1360" height="850" loading="lazy"
+             alt="Settings, Backends: a vCenter and a Proxmox VE cluster in a list, and a form to add another of either type"></a>
+          <figcaption><strong>Backends.</strong> vCenters and Proxmox VE clusters, side by side.</figcaption>
+        </figure>
+        <figure>
+          <a href="img/backend-proxmox.webp"><img src="img/backend-proxmox.webp" width="1360" height="850" loading="lazy"
+             alt="A Proxmox VE backend's placement: dropdowns for node, storages, bridge and pool with free space shown, and its static IP pool"></a>
+          <figcaption><strong>Set up from dropdowns.</strong> Nodes, storages and bridges are read from the cluster.</figcaption>
         </figure>
         <figure>
           <a href="img/vm-detail.webp"><img src="img/vm-detail.webp" width="1360" height="850" loading="lazy"
@@ -174,17 +188,20 @@
     <div class="wrap two-col">
       <div>
         <h2>Security</h2>
-        <p class="section-lead">The portal holds a vCenter account, so it's built like it.</p>
+        <p class="section-lead">The portal holds the keys to your hypervisors, so it's built like it.</p>
         <a href="https://github.com/OWNER/vm-portal/blob/main/SECURITY.md">Read the security notes →</a>
       </div>
       <ul class="checks">
-        <li>vCenter credentials and other secrets encrypted at rest, never sent back to the browser.</li>
+        <li>vCenter passwords, Proxmox API tokens and other secrets encrypted at rest, never sent back to the
+          browser.</li>
         <li>Users see and manage only their own VMs; admins see everything.</li>
         <li>Turning on risky settings needs the admin's password again; every change is in the audit log.</li>
         <li>OpenTofu and Packer run with a minimal environment, without the portal's own secrets.</li>
-        <li>VMs: SSH keys only, console password stored as a bcrypt hash, cloud-init data removed from
-          vCenter after first boot.</li>
-        <li>Console: ESXi certificate pinned, Origin and ownership checked.</li>
+        <li>VMs: SSH keys only, console password stored as a bcrypt hash, cloud-init secrets removed from
+          the backend after first boot.</li>
+        <li>Certificates are checked or pinned by fingerprint, never ignored: for the API, the console,
+          OpenTofu and Packer.</li>
+        <li>Console: Origin and ownership checked.</li>
         <li>Strict Content Security Policy, CSRF tokens, login throttling, HTTPS-only mode with HSTS.</li>
         <li>Backups always encrypted; scheduled ones to age public keys, so the portal can't read them.
           Nothing in a backup is trusted on restore.</li>
@@ -196,29 +213,34 @@
     <div class="wrap two-col">
       <div>
         <h2>Quick start</h2>
-        <p>On a Linux Docker host that can reach vCenter:</p>
+        <p>On a Linux Docker host that can reach vCenter or a Proxmox VE node:</p>
 <pre class="code"><code>git clone https://github.com/OWNER/vm-portal
 cd vm-portal
 docker compose up -d --build
 docker compose logs portal | grep "setup token"</code></pre>
         <p>Open <code>http://&lt;docker-host&gt;:8080</code> and enter the setup token. A wizard connects
-          vCenter (with dropdowns for datacenter, cluster, datastore, network and folder), the IP pool and
-          your SSH keys. Then pick an installer ISO for an image and build your first template.</p>
+          your first backend, a vCenter or a Proxmox VE cluster (with dropdowns for where VMs go), the IP
+          pool and your SSH keys. Then pick an installer ISO for an image and build your first template.</p>
       </div>
       <div>
         <h3>You need</h3>
         <ul class="plain-list">
-          <li>vCenter 7 or 8 and a service account with the permissions listed in the README.</li>
-          <li>Installer ISOs on a datastore.</li>
+          <li>vCenter 7 or 8 with a service account, or Proxmox VE 8 or 9 with an API token; the README
+            lists the permissions for both.</li>
+          <li>Installer ISOs on a datastore or an ISO storage.</li>
           <li>A Linux Docker host on the same network as the VMs.</li>
           <li>A reverse proxy with HTTPS for anything beyond a lab.</li>
         </ul>
         <h3>Images</h3>
         <ul class="plain-list">
-          <li><strong>Ubuntu 26.04 + Docker</strong>: tested.</li>
-          <li><strong>Debian 13 + Docker</strong>: tested.</li>
-          <li><strong>Rocky Linux 10</strong>: a starter for the RHEL family, not yet tested on real
-            hardware.</li>
+          <li><strong>Ubuntu 26.04 + Docker</strong>: tested on vSphere and Proxmox VE.</li>
+          <li><strong>Debian 13 + Docker</strong>: tested on vSphere and Proxmox VE.</li>
+          <li><strong>Rocky Linux 10</strong>: tested on Proxmox VE; not yet on vSphere.</li>
+        </ul>
+        <h3>Proxmox VE</h3>
+        <ul class="plain-list">
+          <li>Tested on a single node running Proxmox VE 9.2. Clusters with several nodes and VLAN tags
+            are built in but have only run against a simulated API so far.</li>
         </ul>
       </div>
     </div>
@@ -229,8 +251,8 @@ docker compose logs portal | grep "setup token"</code></pre>
   <div class="wrap foot-row">
     <p>vm-portal is open source under the <a href="https://github.com/OWNER/vm-portal/blob/main/LICENSE">Apache
       License 2.0</a>. <a href="https://github.com/OWNER/vm-portal">Source on GitHub</a>.</p>
-    <p class="fine">Not affiliated with or endorsed by VMware or Broadcom. VMware and vSphere are trademarks
-      of their owners. This page uses no cookies, scripts or trackers.</p>
+    <p class="fine">Not affiliated with or endorsed by VMware, Broadcom or Proxmox Server Solutions. VMware, vSphere
+      and Proxmox are trademarks of their owners. This page uses no cookies, scripts or trackers.</p>
   </div>
 </footer>
 </body>

@@ -79,7 +79,8 @@ def test_packer_http_ip_setting():
         r = save(c, "templates", template_max_age_days="30", packer_http_ip="not-an-ip")
         assert r.status_code == 400
         save(c, "templates", template_max_age_days="30", packer_http_ip="10.0.0.5")
-    assert packer.http_ip() == "10.0.0.5"
+    from backup_helpers import vc
+    assert packer.http_ip(vc()) == "10.0.0.5"
     img = images.get("debian-13")
-    env = packer.packer_env(img, images.config(img), "debian-13-docker-x")
+    env = packer.packer_env(img, images.config(img), "debian-13-docker-x", vc())
     assert env["PKR_VAR_http_ip"] == "10.0.0.5"

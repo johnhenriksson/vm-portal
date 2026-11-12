@@ -2,29 +2,46 @@
 Packer's vsphere-iso builder. Implements base.Platform.
 
 Provisioning itself goes through OpenTofu; the API part is for listing templates,
-showing VM state, powering VMs on/off and setting their autostart. All functions are
-blocking: call them with run_in_threadpool / asyncio.to_thread.
+showing VM state, powering VMs on/off and setting their autostart. Every call acts on one
+backend (a vCenter): its connection and caches are kept per backend. All functions are
+blocking: call them with asyncio.to_thread.
 """
 import hashlib
+import logging
 import re
 import ssl
-from urllib.parse import urlsplit
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim, vmodl
 
-from ..config import get_settings, vcenter_configured
-from .base import CREATED_BY, Autostart, ConsoleTicket, VMInfo
+from ..config import get_settings
+from .base import CREATED_BY, Autostart, ConsoleTicket, VMInfo, usable_ipv4
 
 NAME = "vsphere"
 LABEL = "VMware vSphere"
-
-_lock = threading.Lock()
-_si = None
+SUMMARY = "A vCenter, with a service account"
+API = "vCenter"
+CAN_PROVISION = True
+GUEST_POWER_NEEDS_TOOLS = True      # RebootGuest/ShutdownGuest go through VMware Tools
+GUEST_TOOLS = "VMware Tools"
+AUTOSTART_HINT = "Set on the host in vCenter."
+HOST_AUTOSTART_HELP = "An administrator can turn it on in vCenter (the host > Configure > VM Startup/Shutdown)."
+SERVER_FIELD = "vsphere_server"
+SECRET_FIELD = "vsphere_password"
+CONNECTION = ("vsphere_server", "vsphere_user", "vsphere_password", "vsphere_insecure")
+PLACEMENT = ("vsphere_datacenter", "vsphere_cluster", "vsphere_datastore", "vsphere_network", "vsphere_folder")
+REQUIRED = ("vsphere_server", "vsphere_user", "vsphere_password", "vsphere_datacenter", "vsphere_cluster",
+            "vsphere_datastore", "vsphere_network")
+# Packer builds use this source type (see images/README.md).
+PACKER_SOURCE = "vsphere-iso"
+LOCATION_LABEL = ""                 # DRS (or the cluster) places a VM; there's nothing to choose
+log = logging.getLogger(__name__)
 
 PROPS = [
     "name",
@@ -32,25 +49,50 @@ PROPS = [
     "config.createDate",
     "config.annotation",
     "runtime.powerState",
+    "runtime.bootTime",
     "guest.ipAddress",
     "guest.net",
     "guest.toolsRunningStatus",
 ]
+CACHE_SECONDS = 5
+DISK_SECONDS = 300      # a template's disk size: templates are rarely changed in place
 
 
-def _connect():
-    global _si
-    s = get_settings()
-    if _si is not None:
+@dataclass
+class _Session:
+    """One backend's connection and caches. pyVmomi calls on it are serialised by its lock;
+    other backends aren't held up by a slow one."""
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    si: object | None = None
+    rows: tuple[float, list[dict]] | None = None
+    isos: tuple[float, tuple, list[str]] | None = None
+    disks: dict[str, tuple[float, int | None]] = field(default_factory=dict)   # template moid -> its disk
+
+
+_sessions: dict[str, _Session] = {}
+_sessions_lock = threading.Lock()
+
+
+def _session(b) -> _Session:
+    with _sessions_lock:
+        return _sessions.setdefault(b.key, _Session())
+
+
+def _connect(b):
+    """The backend's service instance; reconnects when the session expired. Called with
+    the session's lock held."""
+    st = _session(b)
+    if st.si is not None:
         try:
-            _si.CurrentTime()
-            return _si
+            st.si.CurrentTime()
+            return st.si
         except Exception:  # noqa: BLE001 - session expired or network blip; reconnect
-            _si = None
-    if not vcenter_configured(s):
-        raise RuntimeError("vCenter is not configured yet (Settings → vCenter)")
-    _si = _smart_connect(s.vsphere_server, s.vsphere_user, s.vsphere_password, s.vsphere_insecure)
-    return _si
+            st.si = None
+    if not b.configured:
+        raise RuntimeError(f"{b.name} is not configured yet (Settings → Backends)")
+    c = b.cfg
+    st.si = _smart_connect(c.vsphere_server, c.vsphere_user, c.vsphere_password, c.vsphere_insecure)
+    return st.si
 
 
 def _smart_connect(server: str, user: str, password: str, insecure: bool):
@@ -60,31 +102,24 @@ def _smart_connect(server: str, user: str, password: str, insecure: bool):
                         httpConnectionTimeout=15)
 
 
-def test_connection(server: str, user: str, password: str, insecure: bool) -> str:
-    """Log in with the given credentials and describe what we found. Raises on failure."""
-    si = _smart_connect(server, user, password, insecure)
-    try:
-        content = si.RetrieveContent()
-        dcs = [e.name for e in content.rootFolder.childEntity if isinstance(e, vim.Datacenter)]
-        return f"Connected to {content.about.fullName}. Datacenters: {', '.join(dcs) or 'none'}"
-    finally:
-        Disconnect(si)
+def close(b=None) -> None:
+    """Drop one backend's sessions (all of them without b): settings changed or stopping."""
+    with _sessions_lock:
+        keys = [k for k in _sessions if b is None or k.split(":")[0] == str(b.id)]
+        gone = [_sessions.pop(k) for k in keys]
+    for st in gone:
+        with st.lock:
+            if st.si is not None:
+                try:
+                    Disconnect(st.si)
+                except Exception:  # noqa: BLE001 - it's going away anyway
+                    pass
+                st.si = None
 
 
-def close() -> None:
-    global _si
-    _invalidate()
-    with _lock:
-        if _si is not None:
-            try:
-                Disconnect(_si)
-            finally:
-                _si = None
-
-
-def _collect(props: list[str]) -> list[dict]:
+def _collect(b, props: list[str]) -> list[dict]:
     """Fetch properties of all VMs in one round trip via the PropertyCollector."""
-    si = _connect()
+    si = _connect(b)
     content = si.RetrieveContent()
     view = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
     try:
@@ -112,60 +147,107 @@ def _collect(props: list[str]) -> list[dict]:
 def _to_info(row: dict) -> VMInfo:
     ips = []
     for nic in row.get("guest.net") or []:
-        ips.extend(a for a in (nic.ipAddress or []) if ":" not in a)  # IPv4 only
-    created = row.get("config.createDate")
+        ips.extend(a for a in (nic.ipAddress or []) if usable_ipv4(a))   # IPv4, not link-local
+    created, booted = row.get("config.createDate"), row.get("runtime.bootTime")
     if created and created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
+    if booted and booted.tzinfo is None:
+        booted = booted.replace(tzinfo=timezone.utc)
     return VMInfo(
         name=row.get("name", ""),
         is_template=bool(row.get("config.template")),
         power_state=str(row.get("runtime.powerState") or ""),
-        ip=row.get("guest.ipAddress"),
+        # VMware Tools' primary address, unless it's IPv6 or link-local: then the first IPv4 one.
+        ip=usable_ipv4(row.get("guest.ipAddress")) or (ips[0] if ips else None),
         ips=ips,
         created=created,
         notes=row.get("config.annotation") or "",
         tools_running=row.get("guest.toolsRunningStatus") == "guestToolsRunning",
+        booted=booted,
     )
 
 
-_cache: tuple[float, list[dict]] | None = None
-CACHE_SECONDS = 5
-
-
-def _rows(fresh: bool = False) -> list[dict]:
-    global _cache
-    with _lock:
-        if not fresh and _cache and time.monotonic() - _cache[0] < CACHE_SECONDS:
-            return _cache[1]
-        rows = _collect(PROPS)
-        _cache = (time.monotonic(), rows)
+def _rows(b, fresh: bool = False) -> list[dict]:
+    st = _session(b)
+    with st.lock:
+        if not fresh and st.rows and time.monotonic() - st.rows[0] < CACHE_SECONDS:
+            return st.rows[1]
+        rows = _collect(b, PROPS)
+        st.rows = (time.monotonic(), rows)
         return rows
 
 
-def all_vms(fresh: bool = False) -> list[VMInfo]:
-    return [_to_info(r) for r in _rows(fresh)]
+def all_vms(b, fresh: bool = False) -> list[VMInfo]:
+    return [_to_info(r) for r in _rows(b, fresh)]
 
 
-def templates() -> list[VMInfo]:
-    """Templates matching the configured prefixes, newest first."""
+def first_disk_gb(devices) -> int | None:
+    """The size in GB (rounded up) of the VM's first disk, the one a clone sizes as `disk.0`."""
+    disks = sorted((d for d in devices or [] if isinstance(d, vim.vm.device.VirtualDisk)),
+                   key=lambda d: (d.controllerKey, d.unitNumber or 0))
+    if not disks:
+        return None
+    size = disks[0].capacityInBytes or (disks[0].capacityInKB or 0) * 1024
+    return -(-size // 1024 ** 3) or None
+
+
+def _template_disks(b, rows: list[dict]) -> dict[str, int | None]:
+    """Each template's disk size by its moid, in one round trip for the ones not cached."""
+    st = _session(b)
+    with st.lock:
+        now = time.monotonic()
+        want = [r["_obj"] for r in rows if (hit := st.disks.get(r["_obj"]._moId)) is None
+                or now - hit[0] > DISK_SECONDS]
+        if want:
+            si = _connect(b)
+            content = si.RetrieveContent()
+            pc = vmodl.query.PropertyCollector
+            spec = pc.FilterSpec(objectSet=[pc.ObjectSpec(obj=o, skip=False) for o in want],
+                                 propSet=[pc.PropertySpec(type=vim.VirtualMachine,
+                                                          pathSet=["config.hardware.device"], all=False)])
+            for o in want:
+                st.disks[o._moId] = (now, None)
+            result = content.propertyCollector.RetrievePropertiesEx([spec], pc.RetrieveOptions())
+            while result:
+                for obj in result.objects:
+                    devices = next((p.val for p in obj.propSet if p.name == "config.hardware.device"), None)
+                    st.disks[obj.obj._moId] = (now, first_disk_gb(devices))
+                if not result.token:
+                    break
+                result = content.propertyCollector.ContinueRetrievePropertiesEx(result.token)
+        return {k: v[1] for k, v in st.disks.items()}
+
+
+def templates(b) -> list[VMInfo]:
+    """Templates matching the configured prefixes, newest first, with their disk sizes."""
     from ..images import template_prefixes
     prefixes = tuple(p + "-" for p in template_prefixes())
-    ts = [v for v in all_vms() if v.is_template and v.name.startswith(prefixes)]
+    rows = [r for r in _rows(b) if r.get("config.template") and str(r.get("name", "")).startswith(prefixes)]
+    try:
+        disks = _template_disks(b, rows)
+    except Exception:  # noqa: BLE001 - the sizes are a convenience; the list still works without them
+        log.warning("Could not read the template disk sizes on %s", b.name, exc_info=True)
+        disks = {}
+    ts = []
+    for r in rows:
+        v = _to_info(r)
+        v.disk_gb = disks.get(r["_obj"]._moId)
+        ts.append(v)
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     return sorted(ts, key=lambda t: t.created or epoch, reverse=True)
 
 
-def vms_by_name(fresh: bool = False) -> dict[str, VMInfo]:
-    return {v.name: v for v in all_vms(fresh) if not v.is_template}
+def vms_by_name(b, fresh: bool = False) -> dict[str, VMInfo]:
+    return {v.name: v for v in all_vms(b, fresh) if not v.is_template}
 
 
-def used_ips() -> set[str]:
+def used_ips(b) -> set[str]:
     """Every IPv4 address vCenter knows a VM is using."""
-    return {ip for v in all_vms() for ip in v.ips + ([v.ip] if v.ip else [])}
+    return {ip for v in all_vms(b) for ip in v.ips + ([v.ip] if v.ip else [])}
 
 
-def name_exists(name: str) -> bool:
-    return any(v.name == name for v in all_vms(fresh=True))
+def name_exists(b, name: str) -> bool:
+    return any(v.name == name for v in all_vms(b, fresh=True))
 
 
 def _wait(task, timeout: int = 300) -> None:
@@ -178,10 +260,11 @@ def _wait(task, timeout: int = 300) -> None:
         raise RuntimeError(task.info.error.msg)
 
 
-def power(name: str, action: str, vm_id: str | None = None) -> None:
+def power(b, name: str, action: str, vm_id: str | None = None) -> None:
     """action: on, off (hard), shutdown (guest), reboot (guest)."""
-    with _lock:
-        vm = _find_vm_locked(name, vm_id)
+    st = _session(b)
+    with st.lock:
+        vm = _find_vm_locked(b, name, vm_id)
         if action == "on":
             _wait(vm.PowerOnVM_Task())
         elif action == "off":
@@ -192,7 +275,7 @@ def power(name: str, action: str, vm_id: str | None = None) -> None:
             vm.RebootGuest()
         else:
             raise ValueError(f"unknown power action {action!r}")
-    _invalidate()
+        st.rows = None
 
 
 def _host_of(vm):
@@ -219,40 +302,41 @@ def autostart_spec(vm, enabled: bool):
     return vim.host.AutoStartManager.Config(powerInfo=[info])
 
 
-def autostart(name: str, vm_id: str | None = None) -> Autostart:
-    with _lock:
-        return _autostart_locked(_find_vm_locked(name, vm_id))
+def autostart(b, name: str, vm_id: str | None = None) -> Autostart:
+    with _session(b).lock:
+        return _autostart_locked(_find_vm_locked(b, name, vm_id))
 
 
-def set_autostart(name: str, vm_id: str | None, enabled: bool) -> Autostart:
+def set_autostart(b, name: str, vm_id: str | None, enabled: bool) -> Autostart:
     """Turn the VM's autostart entry on or off on the host it's on now; returns the result."""
-    with _lock:
-        vm = _find_vm_locked(name, vm_id)
+    with _session(b).lock:
+        vm = _find_vm_locked(b, name, vm_id)
         _host_of(vm).configManager.autoStartManager.ReconfigureAutostart(autostart_spec(vm, enabled))
         return _autostart_locked(vm)
 
 
-def delete_template(name: str) -> None:
-    with _lock:
-        vm = _find_locked(name)
+def delete_template(b, name: str) -> None:
+    st = _session(b)
+    with st.lock:
+        vm = _find_locked(b, name)
         if not vm.config.template:
             raise ValueError(f"{name!r} is not a template")
         _wait(vm.Destroy_Task())
-    _invalidate()
+        st.rows = None
 
 
-def _find_locked(name: str):
-    for row in _collect(["name"]):
+def _find_locked(b, name: str):
+    for row in _collect(b, ["name"]):
         if row.get("name") == name:
             return row["_obj"]
     raise LookupError(f"VM {name!r} not found in vCenter")
 
 
-def _find_vm_locked(name: str, moid: str | None):
+def _find_vm_locked(b, name: str, moid: str | None):
     """The portal's VM: by its managed object id when known, so another VM that has (or
     later gets) the same name anywhere in vCenter is never the one acted on."""
     if moid:
-        vm = vim.VirtualMachine(moid, _connect()._stub)
+        vm = vim.VirtualMachine(moid, _connect(b)._stub)
         try:
             ok = vm.name == name and not vm.config.template
         except vmodl.fault.ManagedObjectNotFound:
@@ -261,7 +345,7 @@ def _find_vm_locked(name: str, moid: str | None):
             raise LookupError(f"VM {name!r} is no longer in vCenter")
         return vm
     # No id recorded (a VM from before Terraform state): only an unambiguous match.
-    matches = [r["_obj"] for r in _collect(["name", "config.template"])
+    matches = [r["_obj"] for r in _collect(b, ["name", "config.template"])
                if r.get("name") == name and not r.get("config.template")]
     if len(matches) != 1:
         raise LookupError(f"VM {name!r} not found in vCenter" if not matches else
@@ -269,12 +353,12 @@ def _find_vm_locked(name: str, moid: str | None):
     return matches[0]
 
 
-def vm_facts(moid: str) -> dict | None:
+def vm_facts(b, moid: str) -> dict | None:
     """Where a VM really is, by its id (None when vCenter has no such VM): its name,
     whether it's a template, its notes, datacenter and folder (relative to the
     datacenter's VM folder, as in Settings)."""
-    with _lock:
-        vm = vim.VirtualMachine(moid, _connect()._stub)
+    with _session(b).lock:
+        vm = vim.VirtualMachine(moid, _connect(b)._stub)
         try:
             facts = {"name": vm.name, "template": bool(vm.config.template),
                      "annotation": vm.config.annotation or ""}
@@ -288,11 +372,6 @@ def vm_facts(moid: str) -> dict | None:
     # parts ends with the datacenter's own VM folder ("vm"), which Settings leave out.
     facts["folder"] = "/".join(reversed(parts[:-1]))
     return facts
-
-
-def _invalidate() -> None:
-    global _cache
-    _cache = None
 
 
 # --- inventory (settings dropdowns) ------------------------------------------
@@ -377,24 +456,20 @@ def inventory(server: str, user: str, password: str, insecure: bool, fresh: bool
     return result
 
 
-_iso_cache: tuple[float, tuple, list[str]] | None = None
-
-
-def list_isos() -> list[str]:
-    """ISO files on the configured cluster's datastores, as "[datastore] path/file.iso"."""
-    global _iso_cache
-    s = get_settings()
-    scope = (s.vsphere_server, s.vsphere_datacenter, s.vsphere_cluster)
-    if _iso_cache and _iso_cache[1] == scope and time.monotonic() - _iso_cache[0] < 300:
-        return _iso_cache[2]
-    with _lock:
-        content = _connect().RetrieveContent()
-        dc = next((d for d in _datacenters(content.rootFolder) if d.name == s.vsphere_datacenter), None)
+def list_isos(b) -> list[str]:
+    """ISO files on the backend's cluster's datastores, as "[datastore] path/file.iso"."""
+    c, st = b.cfg, _session(b)
+    scope = (c.vsphere_datacenter, c.vsphere_cluster)
+    if st.isos and st.isos[1] == scope and time.monotonic() - st.isos[0] < 300:
+        return st.isos[2]
+    with st.lock:
+        content = _connect(b).RetrieveContent()
+        dc = next((d for d in _datacenters(content.rootFolder) if d.name == c.vsphere_datacenter), None)
         if dc is None:
-            raise LookupError(f"Datacenter {s.vsphere_datacenter!r} not found")
+            raise LookupError(f"Datacenter {c.vsphere_datacenter!r} not found")
         view = content.viewManager.CreateContainerView(dc.hostFolder, [vim.ClusterComputeResource], True)
         try:
-            cluster = next((c for c in view.view if c.name == s.vsphere_cluster), None)
+            cluster = next((x for x in view.view if x.name == c.vsphere_cluster), None)
         finally:
             view.Destroy()
         stores = cluster.datastore if cluster else dc.datastore
@@ -412,16 +487,21 @@ def list_isos() -> list[str]:
                 for f in r.file or []:
                     isos.append(f"{folder} {f.path}" if folder.endswith("]") else f"{folder}/{f.path}")
     isos.sort(key=str.lower)
-    _iso_cache = (time.monotonic(), scope, isos)
+    st.isos = (time.monotonic(), scope, isos)
     return isos
+
+
+def iso_name(iso: str) -> str:
+    """The file name of an ISO as list_isos gives it, to match an image's ISO pattern."""
+    return iso.split("]")[-1].strip().split("/")[-1]
 
 
 # --- console ------------------------------------------------------------------
 
-def console_ticket(name: str, vm_id: str | None = None) -> ConsoleTicket:
+def console_ticket(b, name: str, vm_id: str | None = None) -> ConsoleTicket:
     """A short-lived WebMKS (VNC over WebSocket) ticket for the VM's ESXi host."""
-    with _lock:
-        vm = _find_vm_locked(name, vm_id)
+    with _session(b).lock:
+        vm = _find_vm_locked(b, name, vm_id)
         if vm.runtime.powerState != "poweredOn":
             raise RuntimeError("The VM is not powered on")
         t = vm.AcquireTicket("webmks")
@@ -435,8 +515,8 @@ def console_ticket(name: str, vm_id: str | None = None) -> ConsoleTicket:
 TF_RESOURCE = ("vsphere_virtual_machine", "this")
 TF_PROVIDER = "registry.opentofu.org/vmware/vsphere"
 TF_LEGACY_PROVIDER = "registry.terraform.io/vmware/vsphere"   # in state written by Terraform
-# Connection settings always come from the current settings (tf_env), so a changed vCenter
-# or password never leaves a VM planning with the old connection. tfvars.json beats
+# Connection settings always come from the backend's current settings (tf_env), so a changed
+# vCenter or password never leaves a VM planning with the old connection. tfvars.json beats
 # TF_VAR_*, so they must not be in it.
 TF_CONNECTION_VARS = ("vsphere_server", "vsphere_user", "vsphere_insecure")
 TF_SECRET_VARS = ("vsphere_password",)
@@ -450,30 +530,40 @@ TF_RECOMPUTED = {"change_version", "reboot_required", "imported", "default_ip_ad
                  "vmx_path", "moid", "power_state", "uuid", "vapp_transport"}
 # Attributes that may go from unset in older state to the provider's default.
 TF_DEFAULTED = {"swap_placement_policy": "inherit"}
+# No variables beyond the common and placement ones.
+TF_EXTRA_VARS: dict[str, type] = {}
 
 
 def tf_module_dir() -> Path:
     return get_settings().terraform_module_dir
 
 
-def tf_env() -> dict[str, str]:
-    s = get_settings()
+def tf_env(b) -> dict[str, str]:
+    c = b.cfg
     return {
-        "TF_VAR_vsphere_server": s.vsphere_server,
-        "TF_VAR_vsphere_user": s.vsphere_user,
-        "TF_VAR_vsphere_password": s.vsphere_password,
-        "TF_VAR_vsphere_insecure": "true" if s.vsphere_insecure else "false",
+        "TF_VAR_vsphere_server": c.vsphere_server,
+        "TF_VAR_vsphere_user": c.vsphere_user,
+        "TF_VAR_vsphere_password": c.vsphere_password,
+        "TF_VAR_vsphere_insecure": "true" if c.vsphere_insecure else "false",
     }
 
 
-def tf_placement() -> dict[str, str]:
-    s = get_settings()
+def locations(b) -> list[str]:
+    return []
+
+
+async def before_change(b, d, log) -> None:
+    return None     # the provider finds a VM by its id wherever vMotion took it
+
+
+def tf_placement(b, location: str | None = None) -> dict[str, str]:
+    c = b.cfg
     return {
-        "datacenter": s.vsphere_datacenter,
-        "cluster": s.vsphere_cluster,
-        "datastore": s.vsphere_datastore,
-        "network": s.vsphere_network,
-        "folder": s.vsphere_folder,
+        "datacenter": c.vsphere_datacenter,
+        "cluster": c.vsphere_cluster,
+        "datastore": c.vsphere_datastore,
+        "network": c.vsphere_network,
+        "folder": c.vsphere_folder,
     }
 
 
@@ -505,25 +595,39 @@ def state_vm_id(state: dict) -> str | None:
     return None
 
 
+# What a create needs beyond OpenTofu: nothing on vSphere (cloud-init travels in guestinfo).
+async def before_create(b, req, d: Path, log) -> dict:
+    return {}
+
+
+async def after_create(b, req, vm_id: str | None, log) -> None:
+    return None
+
+
+async def after_destroy(b, name: str, vm_id: str | None, log) -> None:
+    return None
+
+
+
 # --- Packer (vsphere-iso) -----------------------------------------------------------------
 
-def packer_vars() -> dict[str, str]:
-    s = get_settings()
+def packer_vars(b) -> dict[str, str]:
+    c = b.cfg
     return {
-        "PKR_VAR_vsphere_server": s.vsphere_server,
-        "PKR_VAR_vsphere_user": s.vsphere_user,
-        "PKR_VAR_vsphere_password": s.vsphere_password,
-        "PKR_VAR_vsphere_insecure": "true" if s.vsphere_insecure else "false",
-        "PKR_VAR_vsphere_datacenter": s.vsphere_datacenter,
-        "PKR_VAR_vsphere_cluster": s.vsphere_cluster,
-        "PKR_VAR_vsphere_datastore": s.vsphere_datastore,
-        "PKR_VAR_vsphere_network": s.vsphere_network,
-        "PKR_VAR_vsphere_folder": s.vsphere_folder,
+        "PKR_VAR_vsphere_server": c.vsphere_server,
+        "PKR_VAR_vsphere_user": c.vsphere_user,
+        "PKR_VAR_vsphere_password": c.vsphere_password,
+        "PKR_VAR_vsphere_insecure": "true" if c.vsphere_insecure else "false",
+        "PKR_VAR_vsphere_datacenter": c.vsphere_datacenter,
+        "PKR_VAR_vsphere_cluster": c.vsphere_cluster,
+        "PKR_VAR_vsphere_datastore": c.vsphere_datastore,
+        "PKR_VAR_vsphere_network": c.vsphere_network,
+        "PKR_VAR_vsphere_folder": c.vsphere_folder,
     }
 
 
-def api_host() -> str:
-    server = get_settings().vsphere_server
+def api_host(b) -> str:
+    server = b.cfg.vsphere_server
     return server.rsplit(":", 1)[0] if server.count(":") == 1 else server
 
 
@@ -535,13 +639,13 @@ STATE_DATA = {("vsphere_datacenter", "this"), ("vsphere_compute_cluster", "this"
               ("vsphere_network", "this"), ("vsphere_virtual_machine", "template")}
 
 
-def import_problems(vm_id: str, name: str, tfvars: dict) -> list[str]:
-    """Confirm the id belongs to that very VM, inside this portal's datacenter (and folder),
+def import_problems(b, vm_id: str, name: str, tfvars: dict) -> list[str]:
+    """Confirm the id belongs to that very VM, inside this backend's datacenter (and folder),
     and that vm-portal created it. Otherwise importing the state would hand the portal, and
     a later destroy, some other VM."""
-    s = get_settings()
+    c = b.cfg
     try:
-        facts = vm_facts(vm_id)
+        facts = vm_facts(b, vm_id)
     except Exception as e:  # noqa: BLE001 - shown in the preview
         return [f"Couldn't check vCenter: {e}"]
     if facts is None:
@@ -551,13 +655,13 @@ def import_problems(vm_id: str, name: str, tfvars: dict) -> list[str]:
         problems.append(f"In vCenter, {vm_id} is a VM named {facts['name']!r}")
     if facts["template"]:
         problems.append(f"{vm_id} is a template")
-    if facts["datacenter"] != s.vsphere_datacenter:
-        problems.append(f"It's in datacenter {facts['datacenter']!r}, not the portal's {s.vsphere_datacenter!r}")
-    folder = s.vsphere_folder.strip("/")
+    if facts["datacenter"] != c.vsphere_datacenter:
+        problems.append(f"It's in datacenter {facts['datacenter']!r}, not the backend's {c.vsphere_datacenter!r}")
+    folder = c.vsphere_folder.strip("/")
     if folder and facts["folder"] != folder and not facts["folder"].startswith(folder + "/"):
-        problems.append(f"It's in folder {facts['folder'] or '(root)'!r}, outside the portal's {folder!r}")
+        problems.append(f"It's in folder {facts['folder'] or '(root)'!r}, outside the backend's {folder!r}")
     if not facts["annotation"].startswith(CREATED_BY):
         problems.append("vm-portal didn't create it (its vCenter notes don't say so)")
-    if tfvars.get("datacenter") not in (None, s.vsphere_datacenter):
-        problems.append("Its variables name another datacenter than the portal's")
+    if tfvars.get("datacenter") not in (None, c.vsphere_datacenter):
+        problems.append("Its variables name another datacenter than the backend's")
     return problems

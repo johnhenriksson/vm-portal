@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_fields.html" import stepbar %}
+{% block title %}Set up a backend · VM Portal{% endblock %}
+{% block banner %}{{ stepbar(["Admin account", "Backend", "Network & SSH keys"], 2) }}{% endblock %}
+{% block content %}
+{% if not backend %}
+<div class="page-head"><div>
+  <h1>Where should VMs run?</h1>
+  <p class="sub">Connect the first backend: a vCenter or a Proxmox VE cluster. You can add more later under
+    Settings → Backends, of either kind.</p>
+</div></div>
+<form method="post" action="/setup/backend" class="settings-form">
+  {{ csrf_field(request) }}
+  <div class="box-tabs">
+    {% for value, label in types %}
+    <label><input type="radio" name="type" value="{{ value }}" {% if loop.first %}checked{% endif %}>{{ label }}
+      <small>{{ "vCenter 7 or 8" if value == "vsphere" else "Proxmox VE 8 or 9, with an API token" }}</small></label>
+    {% endfor %}
+  </div>
+  <label class="field"><span class="label">Name</span>
+    <input type="text" name="name" maxlength="40" placeholder="e.g. Lab vCenter" autocomplete="off">
+    <span class="hint">What people see when they choose where a VM goes. Empty: the type's name.</span></label>
+  <div class="row form-actions">
+    <button type="submit">Continue</button>
+    <a href="/" class="btn btn-ghost">Skip for now</a>
+  </div>
+</form>
+{% else %}
+<div class="page-head"><div>
+  <h1>Connect to {{ backend.name }}</h1>
+  <p class="sub">{{ backend.platform.LABEL }}: connect, then choose where new VMs and templates go.</p>
+</div></div>
+<form method="post" action="/setup/backend" class="settings-form">
+  {{ csrf_field(request) }}
+  {% include "_vcenter_form.html" if backend.type == "vsphere" else "_proxmox_form.html" %}
+  <div class="row form-actions">
+    <button type="submit">Save and continue</button>
+    <a href="/" class="btn btn-ghost">Skip for now</a>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

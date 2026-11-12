@@ -44,7 +44,7 @@ d-i partman/confirm_nooverwrite boolean true
 tasksel tasksel/first multiselect standard, ssh-server
 # ifupdown: cloud-init's network renderer (else it picks systemd-networkd, which is off).
 # resolvconf: applies the dns-nameservers cloud-init writes for static IPs.
-d-i pkgsel/include string openssh-server open-vm-tools cloud-init cloud-guest-utils sudo curl ca-certificates lvm2 ifupdown resolvconf
+d-i pkgsel/include string openssh-server open-vm-tools qemu-guest-agent cloud-init cloud-guest-utils sudo curl ca-certificates lvm2 ifupdown resolvconf
 d-i pkgsel/upgrade select full-upgrade
 popularity-contest popularity-contest/participate boolean false
 

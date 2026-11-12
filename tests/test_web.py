@@ -11,9 +11,9 @@ def no_vcenter(monkeypatch):
     async def no_delay():
         return None
     monkeypatch.setattr("app.main.login_failed_delay", no_delay)
-    monkeypatch.setattr(vsphere, "vms_by_name", lambda fresh=False: {})
-    monkeypatch.setattr(vsphere, "templates", lambda: [])
-    monkeypatch.setattr(vsphere, "name_exists", lambda name: False)
+    monkeypatch.setattr(vsphere, "vms_by_name", lambda b, fresh=False: {})
+    monkeypatch.setattr(vsphere, "templates", lambda b: [])
+    monkeypatch.setattr(vsphere, "name_exists", lambda b, name: False)
 
 
 def client():
@@ -100,7 +100,6 @@ def test_password_change_is_throttled():
 
 def test_create_rejects_bad_name(monkeypatch):
     from app import config
-    monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
     with client() as c:
         login(c)
         r = c.post("/vms", data={"name": "Bad_Name", "template": "t", "cpus": 2, "memory_mb": 2048,
@@ -180,42 +179,59 @@ def test_password_change_ends_other_sessions():
         assert a.get("/", follow_redirects=False).status_code == 303
 
 
+def no_env_backend(monkeypatch):
+    """Drop the vCenter the environment describes (conftest), so a test can set one up in the UI."""
+    import os
+    from app import config
+    for k in list(os.environ):
+        if k.startswith("VSPHERE_"):
+            monkeypatch.delenv(k)
+    config.get_settings.cache_clear()
+
+
+def add_backend(c, name="Lab vCenter", kind="vsphere") -> int:
+    r = c.post("/settings/backends", data={"csrf_token": csrf(c, "/settings/backends"), "name": name, "type": kind},
+               follow_redirects=False)
+    assert r.status_code == 303, r.text
+    return int(r.headers["location"].rsplit("/", 1)[1])
+
+
 def test_settings_secret_is_encrypted_and_never_rendered(data_dir, monkeypatch):
-    from app import db
+    from app import backends, db
+    no_env_backend(monkeypatch)
     with client() as c:
         login(c)
-        token = csrf(c, "/settings/vcenter")
-        form = {"vsphere_server": "vc2.example", "vsphere_user": "svc", "vsphere_password": "s3cret-pw",
-                "vsphere_datacenter": "DC", "vsphere_cluster": "C", "vsphere_datastore": "DS",
-                "vsphere_network": "N", "csrf_token": token}
-        # conftest sets VSPHERE_* in the environment, which wins; drop them for this test
-        import os
-        for k in list(os.environ):
-            if k.startswith("VSPHERE_"):
-                monkeypatch.delenv(k)
-        from app import config
-        config.get_settings.cache_clear()
-        r = c.post("/settings/vcenter", data=form)
+        bid = add_backend(c)
+        token = csrf(c, f"/settings/backends/{bid}")
+        form = {"name": "Lab vCenter", "enabled": "on", "vsphere_server": "vc2.example", "vsphere_user": "svc",
+                "vsphere_password": "s3cret-pw", "vsphere_datacenter": "DC", "vsphere_cluster": "C",
+                "vsphere_datastore": "DS", "vsphere_network": "N", "csrf_token": token}
+        r = c.post(f"/settings/backends/{bid}", data=form)
         assert r.status_code == 200, r.text
-        assert "s3cret-pw" not in r.text
-        row = db.one("SELECT value, encrypted FROM settings WHERE key='vsphere_password'")
-        assert row["encrypted"] == 1 and "s3cret-pw" not in row["value"]
-        assert config.get_settings().vsphere_password == "s3cret-pw"
+        assert "s3cret-pw" not in r.text and "saved" in r.text
+        row = db.one("SELECT config, secrets FROM backends WHERE id=?", (bid,))
+        assert "s3cret-pw" not in row["secrets"] + row["config"] and "vsphere_password" in row["secrets"]
+        assert backends.get(bid).cfg.vsphere_password == "s3cret-pw" and backends.get(bid).configured
         assert "s3cret-pw" not in (data_dir / "portal.db").read_bytes().decode(errors="ignore")
         # Changing the server without re-entering the password is refused.
-        r = c.post("/settings/vcenter", data={**form, "vsphere_server": "evil.example", "vsphere_password": ""})
+        r = c.post(f"/settings/backends/{bid}", data={**form, "vsphere_server": "evil.example", "vsphere_password": ""})
         assert r.status_code == 400 and "Re-enter the password" in r.text
-        audit = db.query("SELECT detail FROM audit WHERE action='settings.changed'")
-        assert audit and "s3cret-pw" not in audit[0]["detail"]
+        assert backends.get(bid).cfg.vsphere_server == "vc2.example"
+        audit = db.query("SELECT detail FROM audit WHERE action='backend.changed'")
+        assert audit and "s3cret-pw" not in audit[0]["detail"] and "vsphere_password" in audit[0]["detail"]
 
 
 def test_env_values_are_locked():
-    from app import config
-    assert "vsphere_server" in config.env_overrides()
+    from backup_helpers import vc
+    b = vc()
+    assert b.from_env and "vsphere_server" in b.locked
     with client() as c:
         login(c)
-        page = c.get("/settings/vcenter").text
+        page = c.get(f"/settings/backends/{b.id}").text
         assert "Set by the environment" in page and "vc-secret" not in page
+        assert "VSPHERE_SERVER" in page
+        assert c.get("/settings", follow_redirects=False).headers["location"] == "/settings/backends"
+        assert c.get("/settings/vcenter", follow_redirects=False).headers["location"] == f"/settings/backends/{b.id}"
 
 
 def test_password_rules():
@@ -246,52 +262,57 @@ def fake_inventory(monkeypatch):
         seen.update(server=server, password=password)
         return INV
     monkeypatch.setattr(vsphere, "inventory", fake)
-    for k in list(__import__("os").environ):
-        if k.startswith("VSPHERE_"):
-            monkeypatch.delenv(k)
+    no_env_backend(monkeypatch)
     return seen
 
 
 def test_placement_dropdowns(fake_inventory):
     with client() as c:
         login(c)
-        token = csrf(c, "/settings/vcenter")
+        bid = add_backend(c)
+        url = f"/settings/backends/{bid}/placement"
+        token = csrf(c, f"/settings/backends/{bid}")
         base = {"csrf_token": token, "vsphere_server": "vc.lab", "vsphere_user": "u", "vsphere_password": "pw"}
-        r = c.post("/settings/vcenter/placement", data=base, headers={"HX-Request": "true"})
+        r = c.post(url, data=base, headers={"HX-Request": "true"})
         assert r.status_code == 200 and "VMware vCenter &lt;b&gt;9" in r.text  # escaped
         assert fake_inventory == {"server": "vc.lab", "password": "pw"}
         assert '<option value="DC01"' in r.text and "cluster01" not in r.text  # nothing chosen yet
-        r = c.post("/settings/vcenter/placement", data={**base, "vsphere_datacenter": "DC01"})
+        assert f'hx-post="{url}"' in r.text   # choosing reloads this backend's dropdowns
+        r = c.post(url, data={**base, "vsphere_datacenter": "DC01"})
         assert "cluster02" in r.text and "ds01" not in r.text
-        r = c.post("/settings/vcenter/placement", data={**base, "vsphere_datacenter": "DC01",
-                                                        "vsphere_cluster": "cluster02"})
+        r = c.post(url, data={**base, "vsphere_datacenter": "DC01", "vsphere_cluster": "cluster02"})
         assert 'value="ds02" selected' in r.text and 'value="VLAN200" selected' in r.text  # only choice
         assert "portal/dev" in r.text
         # Changing the datacenter resets the cluster.
-        r = c.post("/settings/vcenter/placement", data={**base, "vsphere_datacenter": "DC02",
-                                                        "vsphere_cluster": "cluster02"},
+        r = c.post(url, data={**base, "vsphere_datacenter": "DC02", "vsphere_cluster": "cluster02"},
                    headers={"HX-Trigger-Name": "vsphere_datacenter"})
         assert "not found in vCenter" not in r.text
-        assert c.post("/settings/vcenter/placement", data={"vsphere_server": "x"}).status_code == 403  # no CSRF
+        assert c.post(url, data={"vsphere_server": "x"}).status_code == 403  # no CSRF
 
 
 def test_env_password_is_never_sent_to_another_server(fake_inventory, monkeypatch):
-    # The password comes from the environment, the server from the UI.
-    from app import config, db
+    # The password comes from the environment, the server from the UI: a portal from before
+    # backends, whose stored vCenter settings became the backend the environment completes.
+    import json
+    from app import backends, config, db
     monkeypatch.setenv("VSPHERE_PASSWORD", "env-secret")
-    db.save_settings({"vsphere_server": "vc.lab", "vsphere_user": "u"}, set(), by="test")
     config.get_settings.cache_clear()
+    db.execute("INSERT INTO backends (name, type, from_env, config, created_at, updated_at) VALUES"
+               " ('vCenter', 'vsphere', 1, ?, ?, ?)",
+               (json.dumps({"vsphere_server": "vc.lab", "vsphere_user": "u"}), db.now(), db.now()))
+    b = backends.all_backends()[0]
+    assert b.cfg.vsphere_password == "env-secret" and "vsphere_password" in b.locked
     with client() as c:
         login(c)
-        token = csrf(c, "/settings/vcenter")
-        evil = {"csrf_token": token, "vsphere_server": "attacker.example", "vsphere_user": "u",
+        token = csrf(c, f"/settings/backends/{b.id}")
+        evil = {"csrf_token": token, "name": "vCenter", "vsphere_server": "attacker.example", "vsphere_user": "u",
                 "vsphere_insecure": "on"}
-        r = c.post("/settings/vcenter/placement", data=evil)
+        r = c.post(f"/settings/backends/{b.id}/placement", data=evil)
         assert "set VSPHERE_SERVER in the environment" in r.text and fake_inventory == {}
-        r = c.post("/settings/vcenter", data=evil)
-        assert r.status_code == 400 and config.get_settings().vsphere_server == "vc.lab"
+        r = c.post(f"/settings/backends/{b.id}", data=evil)
+        assert r.status_code == 400 and backends.get(b.id).cfg.vsphere_server == "vc.lab"
         # The configured server still works with the env password.
-        r = c.post("/settings/vcenter/placement", data={**evil, "vsphere_server": "vc.lab"})
+        c.post(f"/settings/backends/{b.id}/placement", data={**evil, "vsphere_server": "vc.lab"})
         assert fake_inventory == {"server": "vc.lab", "password": "env-secret"}
 
 
@@ -299,34 +320,46 @@ def test_placement_flags_missing_and_falls_back(fake_inventory, monkeypatch):
     from app.platforms import vsphere
     with client() as c:
         login(c)
-        base = {"csrf_token": csrf(c, "/settings/vcenter"), "vsphere_server": "vc.lab", "vsphere_user": "u",
+        bid = add_backend(c)
+        url = f"/settings/backends/{bid}/placement"
+        base = {"csrf_token": csrf(c, f"/settings/backends/{bid}"), "vsphere_server": "vc.lab", "vsphere_user": "u",
                 "vsphere_password": "pw", "vsphere_datacenter": "DC01", "vsphere_cluster": "gone"}
-        r = c.post("/settings/vcenter/placement", data=base)
+        r = c.post(url, data=base)
         assert "gone (not found in vCenter)" in r.text
 
         def boom(**kw):
             raise RuntimeError("no route to host")
         monkeypatch.setattr(vsphere, "inventory", boom)
-        r = c.post("/settings/vcenter/placement", data=base)
+        r = c.post(url, data=base)
         assert "no route to host" in r.text and 'name="vsphere_cluster" value="gone"' in r.text
 
 
 def test_setup_wizard(fake_inventory):
-    from app import config
+    from app import backends
     with client() as c:
         login(c)
-        assert c.get("/setup", follow_redirects=False).headers["location"] == "/setup/vcenter"
-        token = csrf(c, "/setup/vcenter")
-        r = c.post("/setup/vcenter", data={"csrf_token": token, "vsphere_server": "vc.lab",
+        assert c.get("/setup", follow_redirects=False).headers["location"] == "/setup/backend"
+        assert c.get("/setup/vcenter", follow_redirects=False).headers["location"] == "/setup/backend"
+        token = csrf(c, "/setup/backend")
+        assert "Where should VMs run?" in c.get("/setup/backend").text
+        r = c.post("/setup/backend", data={"csrf_token": token, "type": "vsphere", "name": ""}, follow_redirects=False)
+        assert r.headers["location"] == "/setup/backend"
+        [b] = backends.all_backends()
+        assert b.name == "vCenter" and b.type == "vsphere"
+        r = c.post("/setup/backend", data={"csrf_token": token, "vsphere_server": "vc.lab",
                                            "vsphere_user": "u", "vsphere_password": "pw"})
         assert r.status_code == 400 and "Still missing" in r.text
-        r = c.post("/setup/vcenter", data={"csrf_token": token, "vsphere_server": "vc.lab", "vsphere_user": "u",
+        r = c.post("/setup/backend", data={"csrf_token": token, "vsphere_server": "vc.lab", "vsphere_user": "u",
                                            "vsphere_password": "pw", "vsphere_datacenter": "DC01",
                                            "vsphere_cluster": "cluster01", "vsphere_datastore": "ds01",
                                            "vsphere_network": "VLAN100"}, follow_redirects=False)
         assert r.headers["location"] == "/setup/network"
-        assert config.vcenter_configured()
-        assert c.get("/setup/network").status_code == 200
+        assert backends.get(b.id).configured
+        assert "Static IP pool on vCenter" in c.get("/setup/network").text
+        r = c.post("/setup/network", data={"csrf_token": token, "ip_pool_start": "10.1.0.10",
+                                           "ip_pool_end": "10.1.0.20", "ip_prefix": "24", "ip_gateway": "10.1.0.1",
+                                           "ip_dns": ""}, follow_redirects=False)
+        assert r.status_code == 303 and backends.get(b.id).cfg.ip_pool_end == "10.1.0.20"
 
 
 def test_admin_cannot_lock_themselves_out():
@@ -344,11 +377,11 @@ def test_role_change_takes_effect_immediately():
     with client() as admin, client() as bob:
         users.create("bob", "green-walrus-72", "admin")
         login(bob, "bob", "green-walrus-72")
-        assert bob.get("/settings/vcenter").status_code == 200
+        assert bob.get("/settings/backends").status_code == 200
         login(admin)
         uid = users.by_name("bob")["id"]
         admin.post(f"/settings/users/{uid}/role", data={"csrf_token": csrf(admin, "/settings/users"), "role": "user"})
-        assert bob.get("/settings/vcenter", follow_redirects=False).status_code == 303  # session ended
+        assert bob.get("/settings/backends", follow_redirects=False).status_code == 303  # session ended
 
 
 def test_creating_admin_credentials_needs_the_acting_admins_password():
@@ -386,20 +419,22 @@ def test_invalid_stored_setting_is_ignored():
 
 def test_iso_picker(monkeypatch):
     from app.platforms import vsphere
-    monkeypatch.setattr(vsphere, "list_isos", lambda: ["[ds1] ISO/ubuntu.iso"])
+    monkeypatch.setattr(vsphere, "list_isos", lambda b: ["[ds1] ISO/ubuntu.iso"])
     with client() as c:
         login(c)
-        r = c.get("/images/defs/ubuntu-26.04/isos")
-        assert "Installer ISO" in r.text and '<option value="[ds1] ISO/ubuntu.iso"' in r.text
+        from backup_helpers import vc
+        r = c.get(f"/images/defs/ubuntu-26.04/isos?backend={vc().id}")
+        assert "Installer ISO on vCenter" in r.text and '<option value="[ds1] ISO/ubuntu.iso"' in r.text
+        assert f'name="iso_{vc().id}"' in r.text
+        assert c.get("/images/defs/ubuntu-26.04/isos?backend=99").status_code == 404
 
 
 def test_create_fails_closed_when_templates_cannot_be_listed(monkeypatch):
     # Without the list, `template` could name any VM in vCenter and Terraform would clone it.
     from app import provision
     from app.platforms import vsphere
-    monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
 
-    def down():
+    def down(b):
         raise RuntimeError("vCenter hiccup")
     monkeypatch.setattr(vsphere, "templates", down)
     created = []
@@ -413,7 +448,6 @@ def test_create_fails_closed_when_templates_cannot_be_listed(monkeypatch):
 
 
 def test_create_with_console_password_is_not_echoed(monkeypatch):
-    monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
     with client() as c:
         login(c)
         r = c.post("/vms", data={"name": "Bad_Name", "template": "t", "cpus": 2, "memory_mb": 2048, "disk_gb": 40,
@@ -437,3 +471,34 @@ def test_build_key_on_templates_tab(monkeypatch, tmp_path):
         before = packer.public_key()
         r = c.post("/settings/templates/regenerate-key", data={"csrf_token": csrf(c, "/settings/templates")})
         assert r.status_code == 200 and packer.public_key() != before
+
+
+def test_cancel_button_is_for_admins_and_builds_only():
+    from app import db, users
+    with client() as c:
+        users.create("alice", "purple-otter-41", "user")
+        alice = users.by_name("alice")
+        build = db.create_job("packer-build", "rocky-10-x", None)
+        create = db.create_job("vm-create", "alice-vm", alice["id"])
+        login(c, "alice", "purple-otter-41")
+        assert "Cancel build" not in c.get(f"/jobs/{create}").text
+        r = c.post(f"/jobs/{build}/cancel", data={"csrf_token": csrf(c, "/")}, follow_redirects=False)
+        assert r.status_code == 403 and db.get_job(build)["status"] == "queued"
+        c.post("/logout", data={"csrf_token": csrf(c, "/")})
+        login(c)
+        assert "Cancel build" in c.get(f"/jobs/{build}").text
+        assert "Cancel build" not in c.get(f"/jobs/{create}").text
+        token = csrf(c, "/")
+        assert c.post(f"/jobs/{create}/cancel", data={"csrf_token": token}).status_code == 400
+        r = c.post(f"/jobs/{build}/cancel", data={"csrf_token": token}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "Cancelling…" in c.get(f"/jobs/{build}").text
+        assert "Cancel requested by admin" in jobs_log(build)
+        db.set_job_status(build, "cancelled", 1)
+        page = c.get(f"/jobs/{build}").text
+        assert "badge cancelled" in page and "job-cancel" not in page
+
+
+def jobs_log(job_id):
+    from app import jobs
+    return jobs.log_path(job_id).read_text()

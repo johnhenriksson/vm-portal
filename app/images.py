@@ -29,6 +29,8 @@ MANIFEST = "image.yaml"
 RESERVED_VARS = {
     "vsphere_server", "vsphere_user", "vsphere_password", "vsphere_insecure", "vsphere_datacenter",
     "vsphere_cluster", "vsphere_datastore", "vsphere_network", "vsphere_folder", "vm_name",
+    "proxmox_url", "proxmox_token_id", "proxmox_token_secret", "proxmox_node", "proxmox_storage",
+    "proxmox_iso_storage", "proxmox_bridge", "proxmox_pool", "proxmox_vlan", "proxmox_insecure",
     "template_prefix", "iso_url", "vm_cpu_num", "vm_mem_size", "vm_disk_size",
     "ssh_private_key_file", "ssh_authorized_keys", "http_ip",
 }
@@ -92,6 +94,8 @@ class Manifest(_Strict):
     guest: str = Field(pattern=r"^[a-z][a-z0-9-]{1,31}$")
     features: list[Literal["docker"]] = []
     template_prefix: str
+    # Backend types it has a Packer source for (`<type>-iso.<name>` in its .pkr.hcl files).
+    platforms: list[Literal["vsphere", "proxmox"]] = Field(["vsphere"], min_length=1)
     login_user: str | None = None             # fixed login user, or …
     login_user_parameter: str | None = None   # … the parameter that sets it
     # Name of the template's network interface, for static IPs. A glob ("en*") is
@@ -195,7 +199,10 @@ def template_prefixes() -> list[str]:
 
 class ImageConfig(_Strict):
     enabled: bool = True
+    # The installer ISO, per backend (by its id): each backend has its own storage. iso_url
+    # is from before backends existed: the ISO on the first vCenter.
     iso_url: str = Field("", max_length=512)
+    isos: dict[str, str] = Field({}, max_length=100)
     cpus: int = Field(2, ge=1, le=32)
     memory_mb: int = Field(2048, ge=1024, le=65536)
     disk_mb: int = Field(25600, ge=10240, le=1048576)
@@ -208,6 +215,33 @@ class ImageConfig(_Strict):
         if CONTROL_RE.search(v):
             raise ValueError("must not contain control characters")
         return v.strip()
+
+    @field_validator("isos")
+    @classmethod
+    def _isos(cls, v: dict[str, str]) -> dict[str, str]:
+        out = {}
+        for k, iso in v.items():
+            if not re.fullmatch(r"[1-9][0-9]{0,8}", k) or len(iso) > 512 or CONTROL_RE.search(iso):
+                raise ValueError("invalid installer ISO")
+            if iso.strip():
+                out[k] = iso.strip()
+        return out
+
+
+def iso_for(cfg: ImageConfig, b) -> str:
+    """The installer ISO a build on this backend uses."""
+    if str(b.id) in cfg.isos:
+        return cfg.isos[str(b.id)]
+    if cfg.iso_url and b.type == "vsphere":
+        from . import backends
+        first = next((x for x in backends.all_backends() if x.type == "vsphere"), None)
+        if first is not None and first.id == b.id:
+            return cfg.iso_url
+    return ""
+
+
+def builds_on(img: "ImageDef", b) -> bool:
+    return img.usable and b.type in img.manifest.platforms
 
 
 def _defaults(img: ImageDef) -> dict:

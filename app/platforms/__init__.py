@@ -1,19 +1,26 @@
 """Virtualization platforms the portal can run VMs on.
 
-    from .platforms import current as platform
-    platform().templates()
+    from .platforms import PLATFORMS
+    PLATFORMS["vsphere"].templates(backend)
 
 Each platform is a module implementing base.Platform; everything specific to one
-platform's API, OpenTofu provider and Packer builder lives in its module. Add one by
-writing the module and registering it in PLATFORMS.
+platform's API, OpenTofu provider and Packer builder lives in its module. A portal uses
+them through its backends (backends.py): named connections, each of one platform type.
+Add a platform by writing the module and registering it in PLATFORMS.
 """
-from . import vsphere
+from . import proxmox, vsphere
 from .base import Autostart, ConsoleTicket, Platform, VMInfo  # noqa: F401 - the package's public names
 
-PLATFORMS: dict[str, Platform] = {p.NAME: p for p in (vsphere,)}
+PLATFORMS: dict[str, Platform] = {p.NAME: p for p in (vsphere, proxmox)}
 
 
-def current() -> Platform:
-    """The platform this installation uses. There's one today; with a second, a setting
-    chosen at setup picks (an installation has one platform)."""
-    return PLATFORMS["vsphere"]
+def for_state(state: dict) -> Platform | None:
+    """The platform whose OpenTofu provider wrote this state, or failing that whose VM
+    resource it has (None: none of ours). Backups check the providers strictly themselves."""
+    resources = [r for r in state.get("resources") or [] if isinstance(r, dict)]
+    used = {r.get("provider") for r in resources}
+    for p in PLATFORMS.values():
+        if used & {f'provider["{a}"]' for a in (p.TF_PROVIDER, p.TF_LEGACY_PROVIDER) if a}:
+            return p
+    types = {r.get("type") for r in resources}
+    return next((p for p in PLATFORMS.values() if p.TF_RESOURCE[0] in types), None)

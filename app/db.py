@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     kind        TEXT NOT NULL,            -- vm-create, vm-destroy, packer-build
     target      TEXT NOT NULL,            -- VM or template name
-    status      TEXT NOT NULL,            -- queued, running, succeeded, failed
+    status      TEXT NOT NULL,            -- queued, running, succeeded, failed, cancelled
     created_at  TEXT NOT NULL,
     started_at  TEXT,
     finished_at TEXT,
@@ -62,6 +62,19 @@ CREATE TABLE IF NOT EXISTS revoked_sessions (
     sid         TEXT PRIMARY KEY,         -- session id from a logged-out cookie
     expires_at  TEXT NOT NULL             -- after this the cookie itself has expired
 );
+CREATE TABLE IF NOT EXISTS backends (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    type        TEXT NOT NULL,            -- a module in app/platforms: vsphere, proxmox
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    admin_only  INTEGER NOT NULL DEFAULT 0,
+    from_env    INTEGER NOT NULL DEFAULT 0, -- the backend VSPHERE_* / PROXMOX_* describe
+    config      TEXT NOT NULL,            -- JSON
+    secrets     TEXT NOT NULL DEFAULT '{}', -- JSON: field -> Fernet token
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    updated_by  TEXT
+);
 CREATE TABLE IF NOT EXISTS audit (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       TEXT NOT NULL,
@@ -82,7 +95,21 @@ MIGRATIONS = [
     ("vms", "notes", "TEXT NOT NULL DEFAULT ''"),
     # Wanted autostart: 1 on, 0 off, NULL not managed (VMs from before the setting existed).
     ("vms", "autostart", "INTEGER"),
+    # The backend the VM is on. NULL: from before backends existed (the first vCenter).
+    ("vms", "backend_id", "INTEGER"),
+    # Proxmox: the first-boot seed ISO still holds the VM's secrets (it's replaced by a
+    # cleaned copy once the VM has booted).
+    ("vms", "seed_pending", "INTEGER NOT NULL DEFAULT 0"),
 ]
+
+# Settings that were global before backends existed, and become the first backend.
+LEGACY_VSPHERE = ("vsphere_server", "vsphere_user", "vsphere_password", "vsphere_insecure", "vsphere_datacenter",
+                  "vsphere_cluster", "vsphere_datastore", "vsphere_network", "vsphere_folder")
+LEGACY_PROXMOX = ("proxmox_server", "proxmox_token_id", "proxmox_token_secret", "proxmox_fingerprint",
+                  "proxmox_node", "proxmox_storage", "proxmox_iso_storage", "proxmox_bridge", "proxmox_pool")
+LEGACY_POOL = ("ip_pool_start", "ip_pool_end", "ip_prefix", "ip_gateway", "ip_dns")
+# Settings only versions from before image definitions wrote (see images.migrate_legacy).
+LEGACY_PACKER = {"packer_iso_url", "packer_cpus", "packer_memory_mb", "packer_disk_mb", "template_keep"}
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -110,7 +137,51 @@ def init_schema(c: sqlite3.Connection) -> None:
         cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+    _migrate_backends(c)
     c.commit()
+
+
+def _migrate_backends(c: sqlite3.Connection) -> None:
+    """Before backends existed, the vCenter connection and the IP pool were global settings.
+    They become a backend (one per type that was set up), marked as the one the environment
+    describes, as the environment always beat stored settings. Secrets move still encrypted.
+    Runs when the database has no backends yet: an upgrade, or a restored older backup."""
+    if c.execute("SELECT 1 FROM backends LIMIT 1").fetchone():
+        return
+    rows = {r[0]: (r[1], r[2]) for r in c.execute("SELECT key, value, encrypted FROM settings")}
+    ts = now()
+    first = None
+    for kind, name, keys in (("vsphere", "vCenter", LEGACY_VSPHERE), ("proxmox", "Proxmox VE", LEGACY_PROXMOX)):
+        if keys[0] not in rows:
+            continue
+        config, secrets = {}, {}
+        for k in (*keys, *(LEGACY_POOL if first is None else ())):
+            if k in rows:
+                value, encrypted = rows[k]
+                if encrypted:
+                    secrets[k] = value
+                else:
+                    config[k] = json.loads(value)
+        if kind == "vsphere" and "vsphere_insecure" not in rows and set(rows) & LEGACY_PACKER:
+            # Versions from before image definitions skipped TLS verification by default; keep
+            # that for their vCenter so the upgrade doesn't break it (images.migrate_legacy
+            # did this before backends existed, and says so in the audit log).
+            config["vsphere_insecure"] = True
+            c.execute("INSERT INTO audit (ts, username, action, detail) VALUES (?, 'migration',"
+                      " 'settings.vsphere_insecure_kept', ?)", (ts, "upgrade kept the old default: TLS certificate "
+                                                                    "verification is off; turn it on in Settings"))
+        cur = c.execute("INSERT INTO backends (name, type, enabled, admin_only, from_env, config, secrets, created_at,"
+                        " updated_at, updated_by) VALUES (?, ?, 1, 0, 1, ?, ?, ?, ?, 'migration')",
+                        (name, kind, json.dumps(config), json.dumps(secrets), ts, ts))
+        if kind == "vsphere":
+            c.execute("UPDATE vms SET backend_id=? WHERE backend_id IS NULL", (cur.lastrowid,))
+        first = first or cur.lastrowid
+    if first is not None:
+        c.execute(f"DELETE FROM settings WHERE key IN ({','.join('?' * len(LEGACY_VSPHERE + LEGACY_PROXMOX + LEGACY_POOL))})",
+                  LEGACY_VSPHERE + LEGACY_PROXMOX + LEGACY_POOL)
+        c.execute("INSERT INTO audit (ts, username, action, detail) VALUES (?, 'migration', 'backends.migrated', ?)",
+                  (ts, "the vCenter connection and IP pool settings became a backend"))
+    c.execute("DELETE FROM settings WHERE key='vm_platform'")
 
 
 def close() -> None:

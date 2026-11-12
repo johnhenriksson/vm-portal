@@ -4,11 +4,11 @@ import shutil
 import pyrage
 import pytest
 
-from app import auth, config, crypto, db, editor, images, provision, users
+from app import auth, backends, config, crypto, db, editor, images, provision, users
 from app.backup import archive, collect, restore
 from app.backup.archive import BackupError
 
-from backup_helpers import make_vm
+from backup_helpers import make_vm, vc
 
 
 @pytest.fixture(scope="module")
@@ -29,7 +29,11 @@ def custom_image(image_id="my-debian"):
 def populate():
     users.create("alice", "correct horse battery", "user")
     users.create("boss", "correct horse battery", "admin")
-    db.save_settings({"vsphere_password": "stored-secret", "default_cpus": 4}, {"vsphere_password"}, by="t")
+    db.save_settings({"default_cpus": 4}, set(), by="t")
+    # A stored backend secret (the environment's VSPHERE_PASSWORD wins while the portal runs,
+    # but what's stored is what a backup has).
+    db.execute("UPDATE backends SET secrets=? WHERE id=?",
+               (backends.encrypt_secrets({"vsphere_password": "stored-secret"}), vc().id))
     config.get_settings.cache_clear()
     make_vm(owner="alice")
     job = db.create_job("vm-create", "web-01", users.by_name("alice")["id"])
@@ -48,8 +52,10 @@ def test_full_backup_contents_and_what_stays_out(keypair):
     data, files = full_backup([keypair[1]])
     assert {"db/users.json", "db/vms.json", "db/settings.json", "secrets.json", "db/jobs.json", "db/audit.json",
             "db/image_settings.json", "vms/web-01/terraform.tfstate", "jobs/1.log",
-            "images/my-debian/image.yaml"} <= set(files)
-    assert json.loads(files["secrets.json"]) == {"vsphere_password": "stored-secret"}
+            "images/my-debian/image.yaml", "db/backends.json"} <= set(files)
+    assert json.loads(files["secrets.json"]) == {"backends": {str(vc().id): {"vsphere_password": "stored-secret"}}}
+    [row] = json.loads(files["db/backends.json"])
+    assert row["name"] == "vCenter" and row["type"] == "vsphere" and "secrets" not in row
     assert json.loads(files["db/settings.json"]) == {"default_cpus": 4}
     names = " ".join(files)
     for never in ("encryption.key", "session.key", "packer_ssh_key", "revoked", ".terraform", "history", ".plan"):
@@ -61,7 +67,7 @@ def test_full_backup_contents_and_what_stays_out(keypair):
 def test_environment_secrets_never_go_into_a_backup():
     # conftest sets VSPHERE_PASSWORD in the environment only.
     files, _ = collect.full("x")
-    assert json.loads(files["secrets.json"]) == {} and b"vc-secret" not in b"".join(files.values())
+    assert json.loads(files["secrets.json"]) == {"backends": {}} and b"vc-secret" not in b"".join(files.values())
 
 
 def test_full_round_trip_on_the_same_installation(keypair):
@@ -86,7 +92,8 @@ def test_full_round_trip_on_the_same_installation(keypair):
     assert db.active_vm("web-01")["autostart"] == 0
     config.get_settings.cache_clear()
     s = config.get_settings()
-    assert s.default_cpus == 4 and db.load_settings()["vsphere_password"] == "stored-secret"
+    assert s.default_cpus == 4 and backends.stored_rows()[0]["secrets"] == {"vsphere_password": "stored-secret"}
+    assert db.active_vm("web-01")["backend_id"] == vc().id
     assert provision.vm_moid("web-01") == "vm-42"
     assert (config.get_bootstrap().jobs_dir / "1.log").read_text() == "cloning...\n"
     assert collect.installation_id() == inst
@@ -115,8 +122,8 @@ def test_restore_onto_another_installation_with_its_own_key(keypair, tmp_path_fa
     assert any("another installation" in w for w in plan.warnings)
     restore.apply_full_restore(plan, by="cli")
     assert (other / "encryption.key").read_bytes() != source_key
-    row = db.one("SELECT value, encrypted FROM settings WHERE key='vsphere_password'")
-    assert row["encrypted"] == 1 and crypto.decrypt(row["value"]) == '"stored-secret"'
+    row = db.one("SELECT secrets FROM backends")
+    assert crypto.decrypt(json.loads(row["secrets"])["vsphere_password"]) == '"stored-secret"'
     assert collect.installation_id() == target_inst
     assert users.by_name("boss")["role"] == "admin"
 

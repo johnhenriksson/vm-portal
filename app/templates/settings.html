@@ -21,12 +21,14 @@
 </div>
 {% endif %}
 
-{% if fields %}
+{% if section == "backends" %}
+  {% if backend %}{% include "_backend_edit.html" %}{% else %}{% include "_backend_list.html" %}{% endif %}
+{% endif %}
+
+{% if fields and section != "backends" %}
 <form method="post" action="/settings/{{ section }}" class="settings-form">
   {{ csrf_field(request) }}
-  {% if section == "vcenter" %}
-    {% include "_vcenter_form.html" %}
-  {% elif section == "templates" %}
+  {% if section == "templates" %}
     <p class="muted">Each image's ISO, sizes and parameters are set on its page under
       <a href="/images?tab=definitions">Images → Image definitions</a>.</p>
     <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
@@ -57,8 +59,8 @@
     <div class="grid-2">{{ field(fields[1]) }}{{ field(fields[2]) }}</div>
     {{ field(fields[3]) }}
     {{ field(fields[4]) }}
-  {% elif section == "network" %}
-    <p class="muted">Static IPs are offered from this pool. Leave the pool empty to only allow DHCP.</p>
+  {% elif section == "vms" %}
+    <p class="muted">Static IP pools are set per backend, under <a href="/settings/backends">Backends</a>.</p>
     <div class="grid-2">{% for f in fields[:-1] %}{{ field(f) }}{% endfor %}</div>
     {{ field(fields[-1]) }}
   {% else %}
@@ -185,13 +187,20 @@
   <div class="card-head">Add user</div>
   <div class="card-body">
     {{ csrf_field(request) }}
-    <div class="grid-2">
+    <div>
       <label class="field"><span class="label">Username</span>
         <input name="username" value="{{ new_username or '' }}" required maxlength="32" autocomplete="off"
                autocapitalize="none" spellcheck="false"></label>
-      <label class="field"><span class="label">Role</span>
-        <select name="role"><option value="user">User: own VMs only</option><option value="admin">Admin: everything</option></select></label>
     </div>
+    <fieldset class="field choice-field"><legend class="label">Role</legend>
+      <div class="card-choices">
+        <label class="card-choice"><input type="radio" name="role" value="user" checked>
+          <span class="card-choice-title">User</span>
+          <span class="card-choice-body">Creates and manages their own VMs</span></label>
+        <label class="card-choice"><input type="radio" name="role" value="admin">
+          <span class="card-choice-title">Admin</span>
+          <span class="card-choice-body">Everything: all VMs, images, backends and settings</span></label>
+      </div></fieldset>
     <label class="field"><span class="label">Initial password</span>
       <input type="password" name="password" required minlength="12" maxlength="256" autocomplete="new-password">
       <span class="hint">At least 12 characters. Share it securely; they can change it under Account.</span></label>
@@ -246,7 +255,7 @@
 {% endif %}
 
 <div class="grid-2" style="margin-top:2rem;align-items:start">
-<form method="post" action="/settings/backup/download" class="card">
+<form method="post" action="/settings/backup/download" class="card" data-download>
   <div class="card-head">Download a backup</div>
   <div class="card-body">
     {{ csrf_field(request) }}
@@ -301,15 +310,15 @@
 </form>
 
 <form method="post" action="/settings/backup/check-vms" class="card" style="margin-top:1.5rem">
-  <div class="card-head">Check VMs against vCenter</div>
+  <div class="card-head">Check VMs against their backends</div>
   <div class="card-body">
     {{ csrf_field(request) }}
-    <p class="muted">After a restore or a move: does each VM's recorded id still belong to that VM, in this portal's
-      datacenter and folder?</p>
+    <p class="muted">After a restore or a move: does each VM's recorded id still belong to that VM, in its
+      backend's part of the platform (datacenter and folder, node or pool)?</p>
     {% if vm_check is defined %}
       {% set bad = vm_check | selectattr("problems") | list %}
       {% if not vm_check %}<p class="muted">No VMs.</p>
-      {% elif not bad %}<div class="alert ok">All {{ vm_check | length }} VM(s) match vCenter.</div>
+      {% elif not bad %}<div class="alert ok">All {{ vm_check | length }} VM(s) match their backends.</div>
       {% else %}<div class="alert warn"><ul>{% for v in bad %}<li><strong>{{ v.name }}</strong>: {{ v.problems | join("; ") }}</li>{% endfor %}</ul></div>{% endif %}
     {% endif %}
     <button class="btn-outline">Check now</button>

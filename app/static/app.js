@@ -35,10 +35,41 @@
     if (input) { input.focus(); input.select(); }
   }
 
-  // Confirm dialogs: <form data-confirm="Really?">
+  // Forms that apply as soon as a choice changes: <form data-autosubmit> (the button stays
+  // for keyboard users and without JavaScript).
+  document.addEventListener("change", (e) => {
+    const form = e.target.closest && e.target.closest("form[data-autosubmit]");
+    if (form && e.target.matches("select")) form.requestSubmit();
+  });
+
+  // Confirm dialogs: <form data-confirm="Really?">. Then, for every form: the button that
+  // sent it shows it's working, and a second click doesn't send it again (a second
+  // reboot, a second VM). Forms that download a file (data-download) stay on the page, so
+  // they're usable again after a moment. htmx forms handle their own requests.
   document.addEventListener("submit", (e) => {
-    const msg = e.target.dataset && e.target.dataset.confirm;
-    if (msg && !window.confirm(msg)) e.preventDefault();
+    const form = e.target;
+    const msg = form.dataset && form.dataset.confirm;
+    if (msg && !window.confirm(msg)) { e.preventDefault(); return; }
+    if (e.defaultPrevented || form.hasAttribute("hx-post") || form.hasAttribute("hx-get")) return;
+    if (form.dataset.sent) { e.preventDefault(); return; }
+    form.dataset.sent = "1";
+    const button = e.submitter || form.querySelector("button:not([type=button]), input[type=submit]");
+    if (button) {
+      button.setAttribute("aria-busy", "true");
+      button.classList.add("sending");
+    }
+    if (form.hasAttribute("data-download")) {
+      setTimeout(() => {
+        delete form.dataset.sent;
+        if (button) { button.removeAttribute("aria-busy"); button.classList.remove("sending"); }
+      }, 3000);
+    }
+  });
+  // Back/forward cache: a page shown again must not keep its forms locked.
+  window.addEventListener("pageshow", (e) => {
+    if (!e.persisted) return;
+    document.querySelectorAll("form[data-sent]").forEach((f) => delete f.dataset.sent);
+    document.querySelectorAll(".sending").forEach((b) => { b.classList.remove("sending"); b.removeAttribute("aria-busy"); });
   });
 
   document.addEventListener("click", (e) => {
@@ -66,6 +97,23 @@
     document.querySelectorAll("details.menu[open]").forEach((d) => {
       if (!d.contains(e.target)) d.open = false;
     });
+  });
+
+  // Escape closes an open menu and hands the focus back to its button.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    document.querySelectorAll("details.menu[open]").forEach((d) => {
+      const hadFocus = d.contains(document.activeElement);
+      d.open = false;
+      if (hadFocus) d.querySelector("summary").focus();
+    });
+  });
+
+  // <select data-details>: the line under it describes the chosen option (free space…).
+  document.addEventListener("change", (e) => {
+    const s = e.target.closest && e.target.closest("select[data-details]");
+    const text = s && s.closest(".field") && s.closest(".field").querySelector("[data-detail-text]");
+    if (text) text.textContent = (s.selectedOptions[0] && s.selectedOptions[0].dataset.detail) || "";
   });
 
   // Name -> id fields: <form data-slug-form> fills [data-slug-target] from [data-slug-source]
@@ -102,6 +150,7 @@
       s.className = "badge " + e.data.replace(/[^a-z]/g, "");
       s.textContent = e.data;
       document.getElementById("job-status").replaceChildren(s);
+      document.getElementById("job-cancel")?.remove();
     });
   }
 
@@ -138,17 +187,44 @@
       $("#dhcp-pane").hidden = stat;
     };
 
+    // A clone's disk can't be smaller than its template's: no smaller choices, and the
+    // size moves up to it when a bigger template is picked.
+    const applyMinDisk = (min) => {
+      const input = $("#disk_gb"), hint = $("#disk-min-hint"), slider = $("[data-slider=disk_gb]");
+      if (!input) return;
+      const floor = +input.dataset.floor || 10;
+      min = Math.max(min, floor);
+      input.min = min;
+      if (+input.value < min) input.value = min;
+      slider?.querySelectorAll(".step").forEach((s) => {
+        const r = s.querySelector("input"), off = +r.value < min;
+        r.disabled = off;
+        s.classList.toggle("off", off);
+      });
+      if (hint) {
+        hint.textContent = `This template's disk is ${min} GB, so the VM's disk can't be smaller.`;
+        hint.hidden = min <= floor;
+      }
+      if (slider) paintSlider(slider);
+    };
+
     // Image rows: the version dropdown picks the template; the chosen image decides
     // the login user and which options apply (disabled fields aren't submitted).
     form.querySelectorAll("[data-image-choice]").forEach((row) => {
       const radio = row.querySelector("input[type=radio]");
-      const select = row.querySelector(".version-select");
-      select.addEventListener("change", () => { radio.value = select.value; radio.checked = true; applyImage(); summary(); });
+      const select = row.querySelector("select");
+      select.addEventListener("change", () => {
+        radio.value = select.value;
+        radio.dataset.minDisk = select.selectedOptions[0]?.dataset.minDisk || "";
+        radio.checked = true; applyImage(); summary();
+      });
       select.addEventListener("click", (e) => e.stopPropagation());
     });
     const applyImage = () => {
-      const row = $("input[name=template]:checked")?.closest("[data-image-choice]");
+      const picked = $("input[name=template]:checked");
+      const row = picked?.closest("[data-image-choice]");
       if (!row) return;
+      applyMinDisk(+picked.dataset.minDisk || 0);
       form.querySelectorAll("[data-show-login-user]").forEach((el) => (el.textContent = row.dataset.loginUser));
       for (const [need, attr] of [["docker", "docker"], ["console-password", "consolePassword"]]) {
         const on = row.dataset[attr] === "yes";

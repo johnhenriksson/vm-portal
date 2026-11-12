@@ -24,6 +24,8 @@ source).
 | [Packer](https://www.packer.io) | see `Dockerfile` | **BUSL-1.1** | Builds templates. Signature-verified at build. |
 | [packer-plugin-vsphere](https://github.com/hashicorp/packer-plugin-vsphere) | see `Dockerfile` | MPL-2.0 | |
 | [terraform-provider-vsphere](https://github.com/vmware/terraform-provider-vsphere) | `~> 2.17` | MPL-2.0 | Mirrored into the image. |
+| [packer-plugin-proxmox](https://github.com/hashicorp/packer-plugin-proxmox) | see `Dockerfile` | MPL-2.0 | |
+| [terraform-provider-proxmox](https://github.com/bpg/terraform-provider-proxmox) (bpg) | `~> 0.121` | MPL-2.0 | Mirrored into the image. |
 | Python packages (`requirements.txt`) | | MIT, BSD-2/3-Clause, Apache-2.0, PSF-2.0, MPL-2.0 (certifi) | FastAPI, Starlette, Uvicorn, Jinja2, pydantic, pyVmomi, cryptography, bcrypt, pyrage, websockets, … |
 | Debian packages (base image, `fping`, `xorriso`, `openssh-client`, …) | Debian bookworm | various, incl. GPL | Unmodified Debian packages; sources at https://sources.debian.org |
 

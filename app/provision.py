@@ -4,17 +4,17 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import bcrypt
 import yaml
 
-from . import config, db, guests, jobs
+from . import backends, config, db, guests, jobs
 from .config import get_settings
-from .platforms import current as platform
-from .platforms.base import CREATED_BY
+from .platforms import PLATFORMS, for_state
+from .platforms.base import CREATED_BY, usable_ipv4
 
 # OpenTofu (MPL-2.0) in the image; plain Terraform also works for local development.
 TOFU = os.environ.get("IAC_BINARY") or ("tofu" if shutil.which("tofu") else "terraform")
@@ -40,6 +40,12 @@ class VMRequest:
     image_id: str | None = None
     network_interface: str = "en*"              # template's NIC name or glob (from the image definition)
     autostart: bool = True                      # start with its host
+    backend_id: int | None = None               # the backend it goes on (backends.py)
+    location: str | None = None                 # where on the backend (a Proxmox node); None = its default
+    # A static IP's network, from the backend's pool settings (create() fills them in).
+    ip_prefix: int = 24
+    ip_gateway: str = ""
+    ip_dns: tuple[str, ...] = ()
 
 
 def validate_name(name: str) -> str:
@@ -95,13 +101,13 @@ def render_userdata(req: VMRequest) -> str:
     return guests.get(req.guest).tfvars(req)["userdata"]
 
 
-def tf_env() -> dict[str, str]:
-    """The platform's connection variables, plus what every run gets. Connection settings
-    always come from the current settings through the environment, never from a VM's tfvars
-    file: values written there at create time would outlive a later change (TLS verification
-    turned on, a new server) and pair the current password with the old connection."""
+def tf_env(b: backends.Backend) -> dict[str, str]:
+    """The backend's connection variables, plus what every run gets. Connection settings
+    always come from the backend's current settings through the environment, never from a
+    VM's tfvars file: values written there at create time would outlive a later change (TLS
+    verification turned on, a new server) and pair the current password with the old one."""
     return {
-        **platform().tf_env(),
+        **b.platform.tf_env(b),
         "TF_IN_AUTOMATION": "1",
         "TF_INPUT": "0",
         "CHECKPOINT_DISABLE": "1",
@@ -112,9 +118,9 @@ def vm_dir(name: str) -> Path:
     return get_settings().vms_dir / name
 
 
-def tfvars(req: VMRequest) -> dict:
+def tfvars(req: VMRequest, b: backends.Backend) -> dict:
     return {
-        **platform().tf_placement(),
+        **b.platform.tf_placement(b, req.location),
         "template": req.template,
         "name": req.name,
         "cpus": req.cpus,
@@ -125,35 +131,57 @@ def tfvars(req: VMRequest) -> dict:
     }
 
 
+def with_network(req: VMRequest, b: backends.Backend) -> VMRequest:
+    """A static IP's prefix, gateway and DNS come from the pool of the backend the VM goes on."""
+    if not req.ip:
+        return req
+    if not b.cfg.ip_gateway:
+        raise ValueError(f"{b.name} has no gateway set, so it can't give a VM a static IP")
+    return replace(req, ip_prefix=b.cfg.ip_prefix, ip_gateway=b.cfg.ip_gateway, ip_dns=tuple(b.cfg.ip_dns))
+
+
 def create(req: VMRequest, owner_id: int | None = None) -> int:
     """Record the VM and start a Terraform apply job. Returns the job id."""
+    b = backends.get(req.backend_id)
+    if b is None:
+        raise ValueError("Choose a backend for the VM")
+    req = with_network(req, b)
+    pf = b.platform
     d = vm_dir(req.name)
     if d.exists():
         raise ValueError(f"A Terraform directory for {req.name!r} already exists ({d})")
     vm_id = db.execute(
         "INSERT INTO vms (name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose, created_at,"
-        " owner_id, console_login, vm_user, image_id, autostart)"
-        " VALUES (?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " owner_id, console_login, vm_user, image_id, autostart, backend_id)"
+        " VALUES (?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (req.name, req.template, req.cpus, req.memory_mb, req.disk_gb,
          "static" if req.ip else "dhcp", req.ip, int(bool(req.compose_yaml)), db.now(), owner_id,
-         int(bool(req.console_password_hash)), req.login_user, req.image_id, int(req.autostart)),
+         int(bool(req.console_password_hash)), req.login_user, req.image_id, int(req.autostart), b.id),
     )
 
     async def run(job_id: int, log: jobs.JobLog) -> None:
-        tf_module = platform().tf_module_dir()
-        log.step(f"Preparing Terraform workspace {d}")
+        tf_module = pf.tf_module_dir()
+        log.step(f"Preparing Terraform workspace {d} (backend {b.name})")
         d.mkdir(parents=True)
-        await log.run([TOFU, "init", "-no-color", "-input=false", f"-from-module={tf_module}"], cwd=d, env=tf_env())
+        env = await asyncio.to_thread(tf_env, b)
+        await log.run([TOFU, "init", "-no-color", "-input=false", f"-from-module={tf_module}"], cwd=d, env=env)
         tfvars_path = d / "terraform.tfvars.json"
         tfvars_path.touch(mode=0o600)  # holds the console password hash
-        tfvars_path.write_text(json.dumps(tfvars(req), indent=2))
+        values = tfvars(req, b)
+        values.update(await pf.before_create(b, req, d, log))
+        tfvars_path.write_text(json.dumps(values, indent=2))
         log.step(f"Cloning {req.template} -> {req.name}")
-        await log.run([TOFU, "apply", "-no-color", "-input=false", "-auto-approve"], cwd=d, env=tf_env())
-        out = await _output(d)
-        ip = out.get("ip") or req.ip
+        await log.run([TOFU, "apply", "-no-color", "-input=false", "-auto-approve"], cwd=d, env=env)
+        out = await _output(d, b)
+        # OpenTofu's "default IP" can be IPv6 link-local before the guest has its IPv4.
+        ip = usable_ipv4(out.get("ip")) or req.ip
         db.execute("UPDATE vms SET ip=? WHERE id=?", (ip, vm_id))
+        # The clone can be bigger than asked for (a template's disk is never shrunk): record
+        # what it got, or later plans would try to shrink it, which the providers refuse.
+        await record_actual_size(d, b, vm_id, log)
+        await pf.after_create(b, req, vm_moid(req.name), log)
         if req.autostart:
-            await enable_autostart(req.name, log)
+            await enable_autostart(b, req.name, log)
         log.step(f"VM ready at {ip}: ssh {req.login_user}@{ip}")
 
     job_id = jobs.submit(
@@ -165,36 +193,46 @@ def create(req: VMRequest, owner_id: int | None = None) -> int:
     return job_id
 
 
-HOST_AUTOSTART_OFF = ("Host {host} has autostart turned off, so the VM won't start with it. An administrator"
-                      " can turn it on in vCenter (the host > Configure > VM Startup/Shutdown).")
+HOST_AUTOSTART_OFF = "Host {host} has autostart turned off, so the VM won't start with it. {help}"
 
 
-async def enable_autostart(name: str, log: jobs.JobLog) -> None:
-    """Add a new VM to its host's startup list. A failure only warns: the VM itself is
-    fine, and its page offers to try again."""
+async def enable_autostart(b: backends.Backend, name: str, log: jobs.JobLog) -> None:
+    """Have a new VM start with its host. A failure only warns: the VM itself is fine,
+    and its page offers to try again."""
     log.step("Turning on autostart")
     try:
-        st = await asyncio.to_thread(platform().set_autostart, name, vm_moid(name), True)
+        st = await asyncio.to_thread(b.platform.set_autostart, b, name, vm_moid(name), True)
     except Exception as e:  # noqa: BLE001 - reported in the log, never fails the job
         log.write(f"Warning: couldn't turn on autostart ({e}). Try again from the VM page.\n")
         return
     if not st.host_enabled:
-        log.write("Warning: " + HOST_AUTOSTART_OFF.format(host=st.host) + "\n")
+        log.write("Warning: " + HOST_AUTOSTART_OFF.format(host=st.host, help=b.platform.HOST_AUTOSTART_HELP).strip() + "\n")
+
+
+def vm_backend(vm: dict) -> backends.Backend:
+    b = backends.of_vm(vm)
+    if b is None:
+        raise ValueError(f"{vm['name']}'s backend no longer exists in this portal")
+    return b
 
 
 def destroy(vm: dict, user_id: int | None = None) -> int:
     d = vm_dir(vm["name"])
+    b = vm_backend(vm)
     db.execute("UPDATE vms SET status='destroying' WHERE id=?", (vm["id"],))
 
     async def run(job_id: int, log: jobs.JobLog) -> None:
+        platform_id = vm_moid(vm["name"])
         if not (d / "terraform.tfstate").exists():
             # Provisioning failed before Terraform created anything.
-            log.step("No Terraform state; nothing to destroy in vCenter")
+            log.step(f"No Terraform state; nothing to destroy on {b.name}")
         else:
-            log.step(f"Destroying {vm['name']}")
+            log.step(f"Destroying {vm['name']} (backend {b.name})")
             keep_state_history(d)
-            await prepare_workspace(d, log)
-            await log.run([TOFU, "destroy", "-no-color", "-input=false", "-auto-approve"], cwd=d, env=tf_env())
+            await prepare_workspace(d, log, b)
+            await log.run([TOFU, "destroy", "-no-color", "-input=false", "-auto-approve"], cwd=d,
+                          env=await asyncio.to_thread(tf_env, b))
+        await b.platform.after_destroy(b, vm["name"], platform_id, log)
         archive = get_settings().data_dir / "destroyed" / f"{vm['name']}-{vm['id']}"
         if d.exists():
             archive.parent.mkdir(exist_ok=True)
@@ -212,7 +250,7 @@ def destroy(vm: dict, user_id: int | None = None) -> int:
 
 
 def forget(vm: dict) -> Path | None:
-    """Stop managing a VM without touching it in vCenter (it moved to another portal).
+    """Stop managing a VM without touching it on its backend (it moved to another portal).
 
     Its OpenTofu files are kept aside in DATA_DIR/forgotten, like a destroyed VM's, so a
     mistake can still be undone by importing a backup. The caller holds the VM's job lock."""
@@ -269,58 +307,84 @@ def write_private(path: Path, data: bytes) -> None:
 
 
 def vm_moid(name: str) -> str | None:
-    """The VM's id on the platform (vCenter's managed object id), from its OpenTofu state
-    (None if unknown)."""
+    """The VM's id on its platform (vCenter's managed object id, Proxmox's VMID), from its
+    OpenTofu state (None if unknown). The state says which platform wrote it."""
     try:
         state = json.loads((vm_dir(name) / "terraform.tfstate").read_text())
     except (OSError, ValueError):
         return None
-    return platform().state_vm_id(state) if isinstance(state, dict) else None
+    if not isinstance(state, dict):
+        return None
+    pf = for_state(state)
+    return pf.state_vm_id(state) if pf else None
 
 
-async def prepare_workspace(d: Path, log: jobs.JobLog) -> None:
+async def prepare_workspace(d: Path, log: jobs.JobLog, b: backends.Backend) -> None:
     """Bring an existing VM's working directory up to date before planning against it.
 
     The directory may come from an older portal (older module copy, Terraform instead of
     OpenTofu), and the VM's template may have been pruned since it was cloned.
     """
-    pf = platform()
+    pf = b.platform
+    await pf.before_change(b, d, log)
+    env = await asyncio.to_thread(tf_env, b)
     for f in pf.tf_module_dir().glob("*.tf"):
         shutil.copyfile(f, d / f.name)
     # Older portals wrote the connection settings into tfvars; drop them so the current
     # ones (from tf_env) apply.
     update_tfvars(d, _drop=pf.TF_CONNECTION_VARS)
-    await log.run([TOFU, "init", "-no-color", "-input=false", "-upgrade"], cwd=d, env=tf_env())
+    await log.run([TOFU, "init", "-no-color", "-input=false", "-upgrade"], cwd=d, env=env)
     legacy = pf.TF_LEGACY_PROVIDER
     if TOFU.endswith("tofu") and legacy and legacy in (d / "terraform.tfstate").read_text():
         log.step("Moving Terraform-era state to the OpenTofu provider address (backup kept)")
         await log.run([TOFU, "state", "replace-provider", "-no-color", "-auto-approve",
-                       legacy, pf.TF_PROVIDER], cwd=d, env=tf_env())
-    facts = template_facts(await _show_json(d))
+                       legacy, pf.TF_PROVIDER], cwd=d, env=env)
+    show = await _show_json(d, b)
+    facts = template_facts(show, pf)
     if facts:
         update_tfvars(d, template_facts=facts)
-    else:
+    elif pf.TF_FACTS:
         log.write("Template facts not found in state; planning against the template itself\n")
+    # VMs created before the portal recorded the size they really got may have a smaller
+    # disk in their variables than in reality; a plan would then try to shrink it.
+    actual = actual_size(show, pf)
+    tfvars = json.loads((d / "terraform.tfvars.json").read_text())
+    if actual and isinstance(tfvars.get("disk_gb"), int) and actual["disk_gb"] > tfvars["disk_gb"]:
+        log.write(f"The disk is {actual['disk_gb']} GB, not {tfvars['disk_gb']} GB as recorded: recording that\n")
+        update_tfvars(d, disk_gb=actual["disk_gb"])
+        db.execute("UPDATE vms SET disk_gb=? WHERE name=? AND status NOT IN ('destroyed', 'forgotten')",
+                   (actual["disk_gb"], d.name))
 
 
-def _vm_resource(show: dict) -> dict | None:
+async def record_actual_size(d: Path, b: backends.Backend, vm_id: int, log: jobs.JobLog) -> None:
+    """Store the VM's real vCPUs, memory and disk size (from its state) in its variables
+    and record."""
+    actual = actual_size(await _show_json(d, b), b.platform)
+    if not actual:
+        return
+    tfvars = json.loads((d / "terraform.tfvars.json").read_text())
+    if any(tfvars.get(k) != v for k, v in actual.items()):
+        if actual["disk_gb"] != tfvars.get("disk_gb"):
+            log.write(f"The disk is {actual['disk_gb']} GB (the template's disk is never shrunk)\n")
+        update_tfvars(d, **actual)
+        db.execute("UPDATE vms SET cpus=?, memory_mb=?, disk_gb=? WHERE id=?",
+                   (actual["cpus"], actual["memory_mb"], actual["disk_gb"], vm_id))
+
+
+def _vm_resource(show: dict, pf) -> dict | None:
     """The VM's attributes from `tofu show -json` of the state."""
     for r in (show.get("values") or {}).get("root_module", {}).get("resources", []):
-        if r.get("address") == _vm_address():
+        if r.get("address") == ".".join(pf.TF_RESOURCE):
             return r.get("values") or {}
     return None
 
 
-def _vm_address() -> str:
-    return ".".join(platform().TF_RESOURCE)
+def template_facts(show: dict, pf=PLATFORMS["vsphere"]) -> dict | None:
+    return pf.tf_template_facts(_vm_resource(show, pf))
 
 
-def template_facts(show: dict) -> dict | None:
-    return platform().tf_template_facts(_vm_resource(show))
-
-
-def actual_size(show: dict) -> dict | None:
-    return platform().tf_size(_vm_resource(show))
+def actual_size(show: dict, pf=PLATFORMS["vsphere"]) -> dict | None:
+    return pf.tf_size(_vm_resource(show, pf))
 
 
 def update_tfvars(d: Path, _drop: tuple[str, ...] = (), **values) -> None:
@@ -354,19 +418,18 @@ def _diff(before, after, unknown, path=()):
         yield path
 
 
-def check_resize_plan(plan: dict) -> list[str]:
+def check_resize_plan(plan: dict, pf=PLATFORMS["vsphere"]) -> list[str]:
     """Problems that make a plan more than an in-place resize of this VM (empty = safe).
 
     A resize may only change the attributes the platform lists (TF_RESIZABLE). Anything else
     in the plan (a manual change on the platform that the plan would revert, a replacement)
     stops the job before it touches the VM."""
-    pf = platform()
     problems = []
     for rc in plan.get("resource_changes", []):
         actions = rc.get("change", {}).get("actions", [])
         if actions in (["no-op"], ["read"]):
             continue
-        if rc.get("address") != _vm_address() or actions != ["update"]:
+        if rc.get("address") != ".".join(pf.TF_RESOURCE) or actions != ["update"]:
             problems.append(f"{rc.get('address')}: {'/'.join(actions)}")
             continue
         ch = rc["change"]
@@ -389,6 +452,8 @@ def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, use
     d = vm_dir(vm["name"])
     if not (d / "terraform.tfstate").exists():
         raise ValueError("This VM has no Terraform state, so the portal can't change it")
+    b = vm_backend(vm)
+    pf = b.platform
     if disk_gb < vm["disk_gb"]:
         raise ValueError("Disks can only grow")
     needs_off = (cpus, memory_mb) != (vm["cpus"], vm["memory_mb"])
@@ -398,12 +463,13 @@ def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, use
         changes = ", ".join(f"{k} {vm[k]} -> {v}" for k, v in target.items() if vm[k] != v)
         log.step(f"Resizing {vm['name']}: {changes}")
         if needs_off and not restart:
-            info = (await asyncio.to_thread(platform().vms_by_name, True)).get(vm["name"])
+            info = (await asyncio.to_thread(pf.vms_by_name, b, True)).get(vm["name"])
             if info is None or info.power_state != "poweredOff":
                 raise jobs.JobFailed("Changing vCPUs or memory restarts the VM, and no restart was allowed")
         keep_state_history(d)
-        await prepare_workspace(d, log)
-        before = actual_size(await _show_json(d))
+        await prepare_workspace(d, log, b)
+        env = await asyncio.to_thread(tf_env, b)
+        before = actual_size(await _show_json(d, b), pf)
         if before and disk_gb < before["disk_gb"]:
             # The clone can be bigger than asked for when the template's disk was bigger.
             raise jobs.JobFailed(f"The disk is already {before['disk_gb']} GB and disks can only grow")
@@ -417,17 +483,17 @@ def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, use
         try:
             update_tfvars(d, **target)
             log.step("Planning")
-            await log.run([TOFU, "plan", "-no-color", "-input=false", f"-out={plan}"], cwd=d, env=tf_env())
-            problems = check_resize_plan(await _show_json(d, plan))
+            await log.run([TOFU, "plan", "-no-color", "-input=false", f"-out={plan}"], cwd=d, env=env)
+            problems = check_resize_plan(await _show_json(d, b, plan), pf)
             if problems:
                 raise jobs.JobFailed("The plan does more than resize the VM, so nothing was changed. This usually"
-                                     " means the VM was changed in vCenter by hand:\n  " + "\n  ".join(problems))
+                                     f" means the VM was changed in {pf.API} by hand:\n  " + "\n  ".join(problems))
             log.step("Applying" + (" (the VM shuts down and starts again)" if needs_off else ""))
-            await log.run([TOFU, "apply", "-no-color", "-input=false", plan], cwd=d, env=tf_env())
+            await log.run([TOFU, "apply", "-no-color", "-input=false", plan], cwd=d, env=env)
         finally:
             shutil.rmtree(private, ignore_errors=True)
             # Record what the VM really has now, whether or not the apply got through.
-            actual = actual_size(await _show_json(d))
+            actual = actual_size(await _show_json(d, b), pf)
             if actual:
                 update_tfvars(d, **actual)
                 db.execute("UPDATE vms SET cpus=?, memory_mb=?, disk_gb=? WHERE id=?",
@@ -440,9 +506,10 @@ def resize(vm: dict, cpus: int, memory_mb: int, disk_gb: int, restart: bool, use
     return job_id
 
 
-async def _show_json(d: Path, plan: str | None = None) -> dict:
+async def _show_json(d: Path, b: backends.Backend, plan: str | None = None) -> dict:
+    env = await asyncio.to_thread(tf_env, b)
     proc = await asyncio.create_subprocess_exec(
-        TOFU, "show", "-json", *([plan] if plan else []), cwd=d, env=jobs.child_env(tf_env()),
+        TOFU, "show", "-json", *([plan] if plan else []), cwd=d, env=jobs.child_env(env),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     out, _ = await proc.communicate()
@@ -452,9 +519,10 @@ async def _show_json(d: Path, plan: str | None = None) -> dict:
         return {}
 
 
-async def _output(d: Path) -> dict:
+async def _output(d: Path, b: backends.Backend) -> dict:
+    env = await asyncio.to_thread(tf_env, b)
     proc = await asyncio.create_subprocess_exec(
-        TOFU, "output", "-json", cwd=d, env=jobs.child_env(tf_env()),
+        TOFU, "output", "-json", cwd=d, env=jobs.child_env(env),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )
     out, _ = await proc.communicate()

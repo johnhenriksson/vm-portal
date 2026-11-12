@@ -68,10 +68,9 @@ def setup(monkeypatch, esxi):
     from app import db, users
     from app.platforms import vsphere
     monkeypatch.setattr("app.main.login_failed_delay", lambda: asyncio.sleep(0))
-    monkeypatch.setattr("app.console.vcenter_configured", lambda: True)
     ticket = vsphere.ConsoleTicket(host="127.0.0.1", port=esxi["port"], path="/ticket/secret-ticket",
                                    thumbprint=esxi["thumbprint"])
-    monkeypatch.setattr(vsphere, "console_ticket", lambda name, moid=None: ticket)
+    monkeypatch.setattr(vsphere, "console_ticket", lambda b, name, moid=None: ticket)
     from app.main import app
     with TestClient(app) as c:
         users.create("alice", "purple-otter-41", "user")
@@ -136,8 +135,7 @@ def test_console_button_only_for_running_vms(setup, monkeypatch):
     c, _ = setup
     login(c, "alice", "purple-otter-41")
     on = vsphere.VMInfo("alice-vm", False, "poweredOn", "10.0.0.5")
-    monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
-    monkeypatch.setattr(vsphere, "vms_by_name", lambda fresh=False: {"alice-vm": on})
+    monkeypatch.setattr(vsphere, "vms_by_name", lambda b, fresh=False: {"alice-vm": on})
     assert "/vms/alice-vm/console" in c.get("/vms/alice-vm").text
     on.power_state = "poweredOff"
     assert "/vms/alice-vm/console" not in c.get("/vms/alice-vm").text

@@ -2,7 +2,8 @@
 
 Never included: the encryption and session keys, the Packer build key, revoked
 sessions, OpenTofu's provider caches and saved plans, and anything set by the
-environment (an environment-only vCenter password stays out of every backup).
+environment (an environment-only vCenter password or Proxmox token secret stays out
+of every backup).
 """
 import json
 import re
@@ -53,6 +54,7 @@ def vms(names: list[str], by: str) -> tuple[dict[str, bytes], dict]:
     busy = set(busy_vms()) & set(names)
     if busy:
         raise ValueError(f"Wait for the running job on {', '.join(sorted(busy))} to finish")
+    from .. import backends
     owners = {u["id"]: u["username"] for u in db.query("SELECT id, username FROM users")}
     rows, files = [], {}
     for name in names:
@@ -63,7 +65,10 @@ def vms(names: list[str], by: str) -> tuple[dict[str, bytes], dict]:
         if f"vms/{name}/terraform.tfstate" not in state:
             raise ValueError(f"{name} has no OpenTofu state to back up")
         files.update(state)
-        rows.append({**vm, "owner_id": None, "last_job_id": None, "owner_username": owners.get(vm["owner_id"])})
+        b = backends.of_vm(vm)
+        # Ids mean nothing on another portal: the owner and the backend go by name.
+        rows.append({**vm, "owner_id": None, "last_job_id": None, "owner_username": owners.get(vm["owner_id"]),
+                     "backend_id": None, "backend_name": b.name if b else None, "backend_type": b.type if b else None})
     files["db/vms.json"] = json.dumps(rows, indent=1).encode()
     return files, {**meta(by), "vms": names}
 
@@ -124,7 +129,9 @@ def _job_logs() -> dict[str, bytes]:
 
 def full(by: str, include_logs: bool = False) -> tuple[dict[str, bytes], dict]:
     """Everything needed to rebuild this portal: database rows, stored settings and secrets,
-    the VMs' OpenTofu state, custom image definitions and, optionally, job logs."""
+    the backends (with their stored secrets), the VMs' OpenTofu state, custom image
+    definitions and, optionally, job logs."""
+    from .. import backends
     from ..config import EDITABLE, SECRET_FIELDS
     busy = busy_vms()
     if busy:
@@ -135,7 +142,12 @@ def full(by: str, include_logs: bool = False) -> tuple[dict[str, bytes], dict]:
     files = {f"db/{t}.json": json.dumps(rows, indent=1).encode() for t, rows in tables.items()}
     files["db/settings.json"] = json.dumps({k: v for k, v in stored.items() if k not in SECRET_FIELDS},
                                            indent=1).encode()
-    files["secrets.json"] = json.dumps({k: v for k, v in stored.items() if k in SECRET_FIELDS}).encode()
+    rows = backends.stored_rows()
+    files["db/backends.json"] = json.dumps([{k: v for k, v in r.items() if k != "secrets"} for r in rows],
+                                           indent=1).encode()
+    files["secrets.json"] = json.dumps({**{k: v for k, v in stored.items() if k in SECRET_FIELDS},
+                                        "backends": {str(r["id"]): r["secrets"] for r in rows if r["secrets"]}}
+                                       ).encode()
     for vm in tables["vms"]:
         if vm["status"] not in db.GONE:
             files.update(_state_files(vm["name"]))

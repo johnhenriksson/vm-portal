@@ -27,14 +27,16 @@
     <input type="text" value="{{ f.value }}" disabled>
     <span class="hint lock">Set by the environment ({{ f.key | upper }})</span>
   {% else %}
-    <select name="{{ f.key }}" {% if not f.options and not f.optional %}disabled{% endif %}
-      {% if f.cascade %}hx-post="/settings/vcenter/placement" hx-trigger="change" hx-target="#placement"{% endif %}>
+    <select name="{{ f.key }}" {% if not f.options and not f.optional %}disabled{% endif %} {% if f.details %}data-details{% endif %}
+      {% if f.cascade %}hx-post="{{ f.cascade }}" hx-trigger="change" hx-target="#placement"{% endif %}>
       <option value="" {% if not f.value %}selected{% endif %} {% if not f.optional %}disabled{% endif %}>{{ f.empty }}</option>
       {% for value, label in f.options %}
-      <option value="{{ value }}" {% if value == f.value %}selected{% endif %}>{{ label }}</option>
+      <option value="{{ value }}" {% if value == f.value %}selected{% endif %}{% if f.details and f.details[value] %} data-detail="{{ f.details[value] }}"{% endif %}>{{ label }}</option>
       {% endfor %}
     </select>
-    {% if f.missing %}<span class="hint lock">The saved value wasn't found in vCenter. Choose another.</span>{% endif %}
+    {% if f.missing %}<span class="hint lock">The saved value wasn't found in {{ f.api }}. Choose another.</span>
+    {% elif f.details %}<span class="hint" data-detail-text>{{ f.details[f.value] or "" }}</span>
+    {% elif f.hint %}<span class="hint">{{ f.hint }}</span>{% endif %}
   {% endif %}
 </label>
 {%- endmacro %}

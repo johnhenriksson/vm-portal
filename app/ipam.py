@@ -1,8 +1,9 @@
 """Find free static IPs.
 
-An IP in the pool counts as *used* if any of these say so:
-  - the portal already assigned it to a VM (database)
-  - vCenter reports it on any VM (VMware Tools)
+Each backend has its own pool, gateway and DNS. An IP in a backend's pool counts as
+*used* if any of these say so:
+  - the portal already assigned it to a VM (database, any backend)
+  - any backend reports it on a VM (VMware Tools, the QEMU guest agent, cloud-init settings)
   - it answers ping
   - it appears in the kernel ARP table after the ping sweep (catches hosts that
     drop ICMP; only meaningful when the container uses host networking)
@@ -19,8 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import db
-from .platforms import current as platform
+from . import backends, db
 from .config import get_settings
 
 log = logging.getLogger(__name__)
@@ -36,39 +36,38 @@ class ScanResult:
 
 
 class IPAMProvider(Protocol):
-    async def scan(self, fresh: bool = False) -> ScanResult: ...
-    async def check(self, ip: str) -> str | None: ...
+    async def scan(self, b, fresh: bool = False) -> ScanResult: ...
+    async def check(self, b, ip: str) -> str | None: ...
 
 
 class PoolNotConfigured(Exception):
     pass
 
 
-def pool() -> list[ipaddress.IPv4Address]:
-    s = get_settings()
+def pool(b) -> list[ipaddress.IPv4Address]:
+    s = b.cfg
     if not (s.ip_pool_start and s.ip_pool_end):
-        raise PoolNotConfigured("Set the IP pool (Settings → Network) to use static IPs")
+        raise PoolNotConfigured(f"Set {b.name}'s IP pool (Settings → Backends) to use static IPs")
     start, end = ipaddress.IPv4Address(s.ip_pool_start), ipaddress.IPv4Address(s.ip_pool_end)
     if end < start:
         raise PoolNotConfigured("IP_POOL_END is before IP_POOL_START")
     return [ipaddress.IPv4Address(i) for i in range(int(start), int(end) + 1)]
 
 
-def network() -> ipaddress.IPv4Network:
-    s = get_settings()
+def network(b) -> ipaddress.IPv4Network:
+    s = b.cfg
     return ipaddress.IPv4Network(f"{s.ip_gateway}/{s.ip_prefix}", strict=False)
 
 
-def validate_static_ip(ip: str) -> str:
+def validate_static_ip(b, ip: str) -> str:
     """Return the normalized IP or raise ValueError with a user-facing message."""
     try:
         addr = ipaddress.IPv4Address(ip.strip())
     except ValueError:
         raise ValueError(f"{ip!r} is not a valid IPv4 address") from None
-    s = get_settings()
-    if not s.ip_gateway:
-        raise ValueError("The gateway is not configured (Settings → Network); static IPs are disabled")
-    net = network()
+    if not b.cfg.ip_gateway:
+        raise ValueError(f"{b.name} has no gateway set (Settings → Backends), so static IPs are off there")
+    net = network(b)
     if addr not in net:
         raise ValueError(f"{addr} is not in {net}")
     if addr in (net.network_address, net.broadcast_address):
@@ -119,16 +118,18 @@ def arp_seen() -> set[str]:
         return set()
 
 
-def classify(candidates: list[str], *, reserved: set[str], vcenter: set[str],
+def classify(candidates: list[str], *, reserved: set[str], on_backends: dict[str, str] | set[str],
              alive: set[str], arp: set[str], infra: set[str]) -> ScanResult:
+    """on_backends: the addresses backends report, with the backend's name (or a plain set)."""
     result = ScanResult(scanned_at=time.time())
     for ip in candidates:
         if ip in infra:
             result.used[ip] = "gateway/DNS"
         elif ip in reserved:
             result.used[ip] = "assigned by portal"
-        elif ip in vcenter:
-            result.used[ip] = "in use by a vCenter VM"
+        elif ip in on_backends:
+            where = on_backends.get(ip) if isinstance(on_backends, dict) else None
+            result.used[ip] = f"in use by a VM on {where}" if where else "in use by a VM"
         elif ip in alive:
             result.used[ip] = "answers ping"
         elif ip in arp:
@@ -138,47 +139,60 @@ def classify(candidates: list[str], *, reserved: set[str], vcenter: set[str],
     return result
 
 
+async def platform_ips() -> dict[str, str]:
+    """Every address any backend reports on a VM, with that backend's name. Backends often
+    share a network, so a pool is checked against all of them. One that can't be reached
+    is skipped (the ping and ARP checks still run)."""
+    async def one(b):
+        try:
+            return b, await asyncio.to_thread(b.platform.used_ips, b)
+        except Exception:  # noqa: BLE001 - scanning still works without this backend's data
+            log.exception("could not read VM IPs from backend %s", b.name)
+            return b, set()
+
+    found: dict[str, str] = {}
+    for b, ips in await asyncio.gather(*(one(b) for b in backends.all_backends() if b.configured)):
+        for ip in ips:
+            found.setdefault(ip, b.name)
+    return found
+
+
 class ScanIPAM:
     CACHE_SECONDS = 60
 
     def __init__(self) -> None:
-        self._cache: ScanResult | None = None
+        self._cache: dict[int, ScanResult] = {}
         self._lock = asyncio.Lock()
 
-    async def scan(self, fresh: bool = False) -> ScanResult:
+    async def scan(self, b, fresh: bool = False) -> ScanResult:
         async with self._lock:
-            if not fresh and self._cache and time.time() - self._cache.scanned_at < self.CACHE_SECONDS:
-                return self._cache
-            s = get_settings()
-            candidates = [str(i) for i in pool()]
-            try:
-                vcenter = await asyncio.to_thread(platform().used_ips)
-            except Exception:  # noqa: BLE001 - scanning still works without vCenter data
-                log.exception("could not read VM IPs from vCenter")
-                vcenter = set()
+            hit = self._cache.get(b.id)
+            if not fresh and hit and time.time() - hit.scanned_at < self.CACHE_SECONDS:
+                return hit
+            s = b.cfg
+            candidates = [str(i) for i in pool(b)]
+            on_backends = await platform_ips()
             alive = await ping_alive(candidates)
-            self._cache = classify(
+            self._cache[b.id] = classify(
                 candidates,
                 reserved=db.reserved_ips(),
-                vcenter=vcenter,
+                on_backends=on_backends,
                 alive=alive,
                 arp=arp_seen(),
                 infra={s.ip_gateway, *s.ip_dns},
             )
-            return self._cache
+            return self._cache[b.id]
 
-    async def check(self, ip: str) -> str | None:
+    async def check(self, b, ip: str) -> str | None:
         """Re-check one IP right before using it. Returns why it's in use, or None."""
-        s = get_settings()
+        s = b.cfg
         if ip in {s.ip_gateway, *s.ip_dns}:
             return "gateway/DNS"
         if ip in db.reserved_ips():
             return "assigned by portal"
-        try:
-            if ip in await asyncio.to_thread(platform().used_ips):
-                return "in use by a vCenter VM"
-        except Exception:  # noqa: BLE001
-            log.exception("could not read VM IPs from vCenter")
+        where = (await platform_ips()).get(ip)
+        if where:
+            return f"in use by a VM on {where}"
         if await ping_alive([ip]):
             return "answers ping"
         if ip in arp_seen():

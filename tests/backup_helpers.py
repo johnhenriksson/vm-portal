@@ -29,8 +29,8 @@ def make_vm(name="web-01", moid="vm-42", owner="alice", ip="10.0.0.11"):
         users.create(owner, "correct horse battery", "user")
     uid = users.by_name(owner)["id"]
     db.execute("INSERT INTO vms (name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose,"
-               " created_at, owner_id, notes) VALUES (?, 'ready', 't', 2, 4096, 40, 'static', ?, 0, ?, ?, 'hi')",
-               (name, ip, db.now(), uid))
+               " created_at, owner_id, notes, backend_id) VALUES (?, 'ready', 't', 2, 4096, 40, 'static', ?, 0, ?, ?,"
+               " 'hi', ?)", (name, ip, db.now(), uid, vc().id))
     d = provision.vm_dir(name)
     d.mkdir(parents=True)
     (d / "terraform.tfstate").write_bytes(state(name, moid))
@@ -47,3 +47,9 @@ def admin():
 def good_facts(name="web-01"):
     return {"name": name, "template": False, "annotation": "Created by vm-portal from x",
             "datacenter": "DC", "folder": ""}
+
+
+def vc():
+    """The vCenter backend the test environment describes (VSPHERE_* in conftest)."""
+    from app import backends
+    return next(b for b in backends.all_backends() if b.type == "vsphere")

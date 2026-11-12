@@ -1,0 +1,42 @@
+{# Settings → Backends → one backend. Needs routes_backends.backend_context(). #}
+{% from "_fields.html" import field %}
+<div class="crumbs"><a href="/settings/backends">Backends</a> / {{ backend.name }}</div>
+<form method="post" action="/settings/backends/{{ backend.id }}" class="settings-form">
+  {{ csrf_field(request) }}
+  <h2 class="sub-head" style="margin-top:0">{{ backend.platform.LABEL }}</h2>
+  <div class="grid-2">
+    <label class="field"><span class="label">Name</span>
+      <input type="text" name="name" required maxlength="40" value="{{ backend.name }}" autocomplete="off">
+      <span class="hint">What people see when they choose where a VM goes.</span></label>
+  </div>
+  <label class="check-field"><input type="checkbox" name="enabled" {% if backend.enabled %}checked{% endif %}>
+    <span><span class="label">Enabled</span><span class="hint">Disabled backends aren't offered for new VMs or builds. Their VMs are still managed.</span></span></label>
+  <label class="check-field"><input type="checkbox" name="admin_only" {% if backend.admin_only %}checked{% endif %}>
+    <span><span class="label">Only admins can create VMs here</span></span></label>
+
+  {% include "_vcenter_form.html" if backend.type == "vsphere" else "_proxmox_form.html" %}
+
+  <h2 class="sub-head">Static IP pool</h2>
+  <p class="muted">Static IPs for VMs on this backend are offered from this pool. Leave it empty to only allow DHCP.</p>
+  <div class="grid-2">{% for f in pool_fields %}{{ field(f) }}{% endfor %}</div>
+  <div class="row form-actions"><button type="submit">Save</button></div>
+</form>
+
+<div class="section card danger-zone" style="max-width:52rem">
+  <div class="card-head">Remove backend</div>
+  <div class="card-body">
+    {% if vm_count %}
+    <p>{{ backend.name }} has {{ vm_count }} VM(s) in this portal. Destroy or forget them before removing it.</p>
+    {% elif backend.locked %}
+    <p>Its settings come from the environment: remove them there, and restart the portal, to remove it.</p>
+    {% else %}
+    <p>Removes the backend from this portal. Nothing changes on {{ backend.platform.API }}.</p>
+    <form method="post" action="/settings/backends/{{ backend.id }}/delete" class="row" style="align-items:flex-end">
+      {{ csrf_field(request) }}
+      <label class="field" style="margin:0;flex:1;max-width:22rem"><span class="label">Type <code>{{ backend.name }}</code> to confirm</span>
+        <input name="confirm" required autocomplete="off"></label>
+      <button class="btn-danger">Remove</button>
+    </form>
+    {% endif %}
+  </div>
+</div>

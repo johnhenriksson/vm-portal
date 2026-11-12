@@ -6,10 +6,10 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import db, jobs, provision, users
+from .. import backends, db, jobs, provision, users
 from ..config import get_bootstrap
 from .archive import Backup, BackupError
-from .checks import check_state, check_tfvars
+from .checks import check_state, check_state_platform, check_tfvars  # noqa: F401 - check_state is used by callers
 from .collect import vm_entries
 
 log = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ class VmImport:
     owner: str | None               # username in the backup
     owner_id: int | None = None     # who owns it here
     replace: bool = False           # this portal already has the VM; its state gets replaced
+    backend: object = None          # backends.Backend it goes on here
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -35,22 +36,45 @@ class VmImport:
         return not self.problems
 
 
+def target_backend(row, pf) -> tuple[backends.Backend | None, str | None]:
+    """The backend a VM from a backup goes on here: the one with its backend's name (and
+    type), else the only one of its type. Returns (backend, problem)."""
+    mine = [x for x in backends.all_backends() if x.type == pf.NAME]
+    named = next((x for x in mine if row.backend_name and x.name.lower() == row.backend_name.lower()), None)
+    if named:
+        return named, None
+    if len(mine) == 1:
+        return mine[0], None
+    if not mine:
+        return None, f"This portal has no {pf.LABEL} backend"
+    return None, (f"This portal has several {pf.LABEL} backends and none is named "
+                  f"{row.backend_name or '(unknown)'!r}: rename the right one to that, then try again")
+
+
 def plan_vm_imports(b: Backup, acting_user: dict) -> list[VmImport]:
-    """Check each VM in the backup against this portal (not yet against vCenter)."""
+    """Check each VM in the backup against this portal (not yet against its backend)."""
     out = []
     for e in vm_entries(b):
         r = e["row"]
         problems: list[str] = []
         try:
-            moid = check_state(r.name, e["state"])
+            pf, moid = check_state_platform(r.name, e["state"])
             if e["tfvars"] is None:
                 raise BackupError(f"{r.name}: the backup has no variables file for it")
-            tfvars = check_tfvars(r.name, e["tfvars"])
+            tfvars = check_tfvars(r.name, e["tfvars"], pf)
         except BackupError as err:
             out.append(VmImport(r.name, r, e["state"], {}, "", e["owner"], problems=[str(err)]))
             continue
         imp = VmImport(r.name, r, e["state"], tfvars, moid, e["owner"])
         local = db.active_vm(r.name)
+        if local:
+            imp.backend = backends.of_vm(local)
+            if imp.backend is None or imp.backend.type != pf.NAME:
+                problems.append(f"This portal's {r.name} is on another kind of backend")
+        else:
+            imp.backend, problem = target_backend(r, pf)
+            if problem:
+                problems.append(problem)
         if local:
             current = provision.vm_moid(r.name)
             if current and current != moid:
@@ -77,14 +101,20 @@ def plan_vm_imports(b: Backup, acting_user: dict) -> list[VmImport]:
     return out
 
 
-def check_vcenter(imports: list[VmImport]) -> None:
-    """Blocking: confirm each VM's id belongs to that very VM, inside this portal's datacenter
-    (and folder), and that vm-portal created it. Otherwise importing the state would hand the
+def check_backends(imports: list[VmImport]) -> None:
+    """Blocking: confirm each VM's id belongs to that very VM, inside its backend's part of
+    the platform, and that vm-portal created it. Otherwise importing the state would hand the
     portal, and a later destroy, some other VM."""
-    from ..platforms import current as platform
     for imp in imports:
-        if not imp.problems:
-            imp.problems.extend(platform().import_problems(imp.moid, imp.name, imp.tfvars))
+        if imp.problems:
+            continue
+        b = imp.backend
+        if b is None:
+            imp.problems.append("Its backend isn't in this portal")
+        elif not b.configured:
+            imp.problems.append(f"{b.name} isn't set up, so the VM can't be checked")
+        else:
+            imp.problems.extend(b.platform.import_problems(b, imp.moid, imp.name, imp.tfvars))
 
 
 def import_vms(imports: list[VmImport], names: list[str], user: dict, source: str) -> list[str]:
@@ -109,11 +139,13 @@ def import_vms(imports: list[VmImport], names: list[str], user: dict, source: st
         if not imp.replace:
             db.execute(
                 "INSERT INTO vms (name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose,"
-                " created_at, owner_id, console_login, vm_user, image_id, notes, autostart)"
-                " VALUES (?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " created_at, owner_id, console_login, vm_user, image_id, notes, autostart, backend_id, seed_pending)"
+                " VALUES (?, 'ready', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (r.name, r.template, r.cpus, r.memory_mb, r.disk_gb, r.ip_mode, r.ip, r.has_compose,
-                 r.created_at, imp.owner_id, r.console_login, r.vm_user, r.image_id, r.notes, r.autostart))
-        db.audit("vm.state_imported", f"{imp.name} ({imp.moid}){' replaced' if imp.replace else ''} from {source}",
+                 r.created_at, imp.owner_id, r.console_login, r.vm_user, r.image_id, r.notes, r.autostart,
+                 imp.backend.id, r.seed_pending))
+        db.audit("vm.state_imported", f"{imp.name} ({imp.moid} on {imp.backend.name})"
+                 f"{' replaced' if imp.replace else ''} from {source}",
                  username=user["username"])
         done.append(imp.name)
     return done
@@ -140,6 +172,8 @@ class FullRestore:
     audit: list
     logs: dict                      # job id -> bytes
     warnings: list[str] = field(default_factory=list)
+    backends: list = field(default_factory=list)          # checks.BackendRow
+    backend_secrets: dict = field(default_factory=dict)   # backend id -> {field: value}
 
     @property
     def summary(self) -> dict:
@@ -182,8 +216,8 @@ def _check_settings(values: dict) -> None:
 def plan_full_restore(b: Backup, *, public_key_encrypted: bool = False) -> FullRestore:
     """Validate a full backup completely, before anything is changed."""
     from .. import editor, images
-    from ..config import EDITABLE, SECRET_FIELDS, build, env_overrides
-    from .checks import AuditRow, ImageSettingRow, JobRow, UserRow, VmRow, rows
+    from ..config import BACKEND_FIELDS, BACKEND_SECRETS, EDITABLE, SECRET_FIELDS, build, env_fields, env_overrides
+    from .checks import AuditRow, BackendRow, ImageSettingRow, JobRow, UserRow, VmRow, rows
     from .collect import installation_id
 
     if b.kind != "full":
@@ -201,10 +235,30 @@ def plan_full_restore(b: Backup, *, public_key_encrypted: bool = False) -> FullR
     secrets = b.json("secrets.json", {})
     if not isinstance(stored, dict) or not isinstance(secrets, dict):
         raise BackupError("Settings: expected an object")
-    unknown = sorted((set(stored) - EDITABLE) | (set(secrets) - SECRET_FIELDS))
-    if unknown or set(stored) & SECRET_FIELDS:
+    backend_secrets = secrets.pop("backends", {})
+    # Backups from before backends existed have the vCenter connection and IP pool as
+    # settings (they become a backend when the restored portal starts).
+    unknown = sorted((set(stored) - EDITABLE - BACKEND_FIELDS) | (set(secrets) - SECRET_FIELDS - BACKEND_SECRETS))
+    if unknown or set(stored) & (SECRET_FIELDS | BACKEND_SECRETS) or not isinstance(backend_secrets, dict):
         raise BackupError(f"Settings: unexpected keys {', '.join(unknown)[:200]}")
     _check_settings({**stored, **secrets})
+
+    backend_rows = rows(BackendRow, b.json("db/backends.json", []), "Backends")
+    if len({x.id for x in backend_rows}) != len(backend_rows) or \
+            len({x.name.lower() for x in backend_rows}) != len(backend_rows):
+        raise BackupError("Backends: duplicate ids or names")
+    if backend_rows and set(stored) & BACKEND_FIELDS:
+        raise BackupError("Settings: both backends and the settings from before them")
+    backend_ids = {x.id for x in backend_rows}
+    for key, sec in backend_secrets.items():
+        if not key.isdigit() or int(key) not in backend_ids or not isinstance(sec, dict) or \
+                set(sec) - BACKEND_SECRETS:
+            raise BackupError("Backends: unexpected secrets")
+    for x in backend_rows:
+        try:
+            backends.validate(x.type, {**x.config, **backend_secrets.get(str(x.id), {})})
+        except ValueError as e:
+            raise BackupError(f"Backend {x.name}: {e}") from None
 
     vm_rows = rows(VmRow, b.json("db/vms.json", []), "VMs")
     if any(v.owner_username is not None or v.id is None for v in vm_rows):
@@ -218,14 +272,19 @@ def plan_full_restore(b: Backup, *, public_key_encrypted: bool = False) -> FullR
     for v in vm_rows:
         if v.owner_id is not None and v.owner_id not in user_ids:
             raise BackupError(f"VMs: {v.name} belongs to a user who isn't in the backup")
+        if v.backend_id is not None and v.backend_id not in backend_ids:
+            raise BackupError(f"VMs: {v.name} is on a backend that isn't in the backup")
         state = b.files.get(f"vms/{v.name}/terraform.tfstate")
         tfvars = b.files.get(f"vms/{v.name}/terraform.tfvars.json")
         if state is None and tfvars is None:
             continue
         if v.status in db.GONE or state is None or tfvars is None:
             raise BackupError(f"VMs: unexpected or incomplete state files for {v.name}")
-        check_state(v.name, state)
-        states[v.name] = (state, check_tfvars(v.name, tfvars))
+        pf, _ = check_state_platform(v.name, state)
+        kind = next((x.type for x in backend_rows if x.id == v.backend_id), "vsphere")
+        if pf.NAME != kind:
+            raise BackupError(f"VMs: {v.name}'s state is from another kind of backend than its own")
+        states[v.name] = (state, check_tfvars(v.name, tfvars, pf))
     for name in b.files:
         if name.startswith("vms/") and name.split("/")[1] not in states:
             raise BackupError(f"{name}: not a VM in the backup")
@@ -277,25 +336,37 @@ def plan_full_restore(b: Backup, *, public_key_encrypted: bool = False) -> FullR
         warnings.append("This file is encrypted to a public key, and anyone with the public key can make such a "
                         "file. Only restore backups from your own backup storage.")
     effective = build({**stored, **secrets})
-    if effective.vsphere_insecure:
+    if effective.vsphere_insecure and "vsphere_server" in stored:
         warnings.append("The restored settings turn off TLS certificate verification for vCenter.")
+    for x in backend_rows:
+        if x.type == "vsphere" and x.config.get("vsphere_insecure"):
+            warnings.append(f"Backend {x.name} turns off TLS certificate verification for its vCenter.")
     if defs:
         if effective.allow_image_editing:
             warnings.append(f"{len(defs)} custom image definition(s) are restored. They are code that runs inside "
-                            "the portal with the vCenter credentials: check them under Images.")
+                            "the portal with the backends' credentials: check them under Images.")
         else:
             warnings.append(f"{len(defs)} custom image definition(s) are restored disabled, because image editing is "
                             "off: review them before enabling.")
     overridden = sorted(set(stored) & env_overrides())
     if overridden:
         warnings.append("The environment overrides these restored settings: " + ", ".join(overridden))
-    if not secrets.get("vsphere_password") and "vsphere_password" not in env_overrides():
+    env = env_fields()
+    if "vsphere_server" in stored and not secrets.get("vsphere_password") and "vsphere_password" not in env:
         warnings.append("The backup has no vCenter password (it came from the environment there): set it in "
-                        "Settings → vCenter or VSPHERE_PASSWORD.")
+                        "Settings → Backends or VSPHERE_PASSWORD.")
+    for x in backend_rows:
+        secret = PLATFORMS_SECRET.get(x.type)
+        if secret and not backend_secrets.get(str(x.id), {}).get(secret) and not (x.from_env and secret in env):
+            warnings.append(f"The backup has no {secret.replace('_', ' ')} for backend {x.name} (it came from the "
+                            f"environment there): set it in Settings → Backends or {secret.upper()}.")
     warnings.append("Everyone is logged out, you included: log in with an admin account from the backup.")
 
     return FullRestore(b, user_rows, stored, secrets, vm_rows, states, img_settings, defs, job_rows,
-                       audit_rows, logs, warnings)
+                       audit_rows, logs, warnings, backend_rows, backend_secrets)
+
+
+PLATFORMS_SECRET = {"vsphere": "vsphere_password", "proxmox": "proxmox_token_secret"}
 
 
 def _build_staging(plan: FullRestore, by: str) -> Path:
@@ -329,13 +400,18 @@ def _build_staging(plan: FullRestore, by: str) -> Path:
         for k, v in (("installation_id", local_inst), ("session_epoch", pysecrets.token_urlsafe(16))):
             c.execute("INSERT INTO settings (key, value, encrypted, updated_at, updated_by) VALUES (?, ?, 0, ?, 'system')",
                       (k, json.dumps(v), ts))
+        for x in plan.backends:   # secrets re-encrypted with this portal's own key
+            c.execute("INSERT INTO backends (id, name, type, enabled, admin_only, from_env, config, secrets, created_at,"
+                      " updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'restore')",
+                      (x.id, x.name, x.type, x.enabled, x.admin_only, x.from_env, json.dumps(x.config),
+                       backends.encrypt_secrets(plan.backend_secrets.get(str(x.id), {})), ts, ts))
         for v in plan.vms:
             c.execute("INSERT INTO vms (id, name, status, template, cpus, memory_mb, disk_gb, ip_mode, ip, has_compose,"
-                      " created_at, last_job_id, owner_id, console_login, vm_user, image_id, notes, autostart)"
-                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      " created_at, last_job_id, owner_id, console_login, vm_user, image_id, notes, autostart,"
+                      " backend_id, seed_pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                       (v.id, v.name, v.status, v.template, v.cpus, v.memory_mb, v.disk_gb, v.ip_mode, v.ip,
                        v.has_compose, v.created_at, v.last_job_id, v.owner_id, v.console_login, v.vm_user,
-                       v.image_id, v.notes, v.autostart))
+                       v.image_id, v.notes, v.autostart, v.backend_id, v.seed_pending))
         for i in plan.image_settings:
             data = json.loads(i.data)
             if i.image_id in plan.images and not editing:
@@ -394,14 +470,15 @@ def apply_full_restore(plan: FullRestore, by: str) -> None:
     """Replace this portal's data with the backup's. Callers stop jobs and requests first
     (jobs.paused). The current data is kept in DATA_DIR/.pre-restore until the next restore."""
     from .. import auth, config
-    from ..platforms import current as platform
+    from ..platforms import PLATFORMS
     b = get_bootstrap()
     staging = _build_staging(plan, by)
     pre = b.data_dir / PRE_RESTORE
     shutil.rmtree(pre, ignore_errors=True)
     pre.mkdir(mode=0o700)
     db.close()
-    platform().close()
+    for p in PLATFORMS.values():
+        p.close()
     moved, placed = [], []
     try:
         for item in SWAPPED:

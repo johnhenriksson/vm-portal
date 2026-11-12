@@ -6,18 +6,18 @@
   {% if vms %}
   <div class="table-wrap">
   <table>
-    <thead><tr><th>Name</th><th>Status</th><th>Power</th><th>IP address</th><th>Size</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th class="wide-only">Status</th><th>Power</th><th>IP address</th><th class="wide-only">Size</th><th></th></tr></thead>
     <tbody>
     {% for vm in vms %}
       <tr>
         <td><div class="name-cell">{{ os_icon(links.distro(vm.image_id, vm.template)) }}
           <div><a class="title" href="/vms/{{ vm.name }}">{{ vm.name }}</a>
-               <span class="meta">{{ link(links.template(vm.template, vm.image_id), vm.template) }}{% if vm.owner %} · {{ vm.owner }}{% endif %}</span></div></div></td>
-        <td>{{ badge(vm.status) }}{% if vm.busy and vm.status == "ready" %} <span class="muted" aria-busy="true"></span>{% endif %}</td>
-        <td>{{ power(vm.power_state) }}</td>
+               <span class="meta">{{ link(links.template(vm.template, vm.image_id), vm.template) }}{% if backend_count > 1 %} · {{ vm.backend }}{% endif %}{% if vm.owner %} · {{ vm.owner }}{% endif %}</span></div></div></td>
+        <td class="wide-only">{{ badge(vm.status) }}{% if vm.busy and vm.status == "ready" %} <span class="muted" aria-busy="true"></span>{% endif %}</td>
+        <td>{{ power(vm.power_state) }}{% if vm.power_pending %} <span class="muted small" aria-busy="true">{{ vm.power_pending }}…</span>{% endif %}</td>
         <td>{% if vm.live_ip %}<span class="mono">{{ vm.live_ip }}</span>{% else %}<span class="faint">–</span>{% endif %}
             <span class="meta small muted" style="display:block">{{ "Static" if vm.ip_mode == "static" else "DHCP" }}</span></td>
-        <td>{{ vm.cpus }} vCPU / {{ (vm.memory_mb / 1024) | round(1) | replace(".0", "") }} GB
+        <td class="wide-only">{{ vm.cpus }} vCPU / {{ (vm.memory_mb / 1024) | round(1) | replace(".0", "") }} GB
             <span class="small muted" style="display:block">{{ vm.disk_gb }} GB disk</span></td>
         <td class="right">
           <details class="menu">
@@ -39,7 +39,7 @@
   <div class="empty-state">
     <h3>No virtual machines yet</h3>
     <p>Create a VM from the latest template. It takes a couple of minutes.</p>
-    {% if vcenter_ready %}<a href="/vms/new" class="btn">Create VM</a>{% endif %}
+    {% if can_create %}<a href="/vms/new" class="btn">Create VM</a>{% endif %}
   </div>
   {% endif %}
 </div>

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Generalize the VM before it becomes a template. Clones are configured by
-# cloud-init from VMware guestinfo (hostname, network, SSH keys).
+# cloud-init from VMware guestinfo or a NoCloud seed ISO (hostname, network, SSH keys).
 set -euxo pipefail
 
 # SSH: key-only, never passwords. 01- sorts first, and sshd uses the first value it reads.
@@ -15,7 +15,10 @@ sudo passwd -l "$USER"
 
 # cloud-init: off during the build (kickstart %post), on for clones.
 sudo rm -f /etc/cloud/cloud-init.disabled
-echo 'datasource_list: [ VMware, None ]' | sudo tee /etc/cloud/cloud.cfg.d/90-vmportal-datasource.cfg > /dev/null
+# Where clones get their cloud-init data: VMware guestinfo, or the portal's NoCloud seed
+# ISO on Proxmox (the build sets VMPORTAL_DATASOURCE).
+case "${VMPORTAL_DATASOURCE:-VMware}" in VMware|NoCloud) ;; *) echo "bad VMPORTAL_DATASOURCE" >&2; exit 1 ;; esac
+echo "datasource_list: [ ${VMPORTAL_DATASOURCE:-VMware}, None ]" | sudo tee /etc/cloud/cloud.cfg.d/90-vmportal-datasource.cfg > /dev/null
 # Make the existing build user cloud-init's default user, so user-data without
 # a users: list doesn't create a second account.
 sudo tee /etc/cloud/cloud.cfg.d/91-default-user.cfg > /dev/null <<CFG

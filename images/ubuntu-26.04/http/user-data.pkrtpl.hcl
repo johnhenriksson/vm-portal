@@ -14,6 +14,9 @@ autoinstall:
   packages:
     - openssh-server
     - open-vm-tools
+    # On Proxmox, Packer finds the build VM's address through the QEMU agent, so it must
+    # come with the install. It only runs where the hypervisor offers its channel.
+    - qemu-guest-agent
     - cloud-guest-utils
   identity:
     hostname: ubuntu-packer

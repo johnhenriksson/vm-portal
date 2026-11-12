@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ..config import CONTROL_RE, LINUX_USER_RE
-from ..platforms import current as platform
+from ..platforms import PLATFORMS, for_state
 from .archive import BackupError
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")   # provision.NAME_RE
@@ -31,7 +31,12 @@ TFVARS_INTS = {"cpus": (1, 32), "memory_mb": (512, 262144), "disk_gb": (1, 65536
 
 
 def check_state(name: str, data: bytes) -> str:
-    """Validate a VM's OpenTofu state; returns the VM's vCenter id (moid)."""
+    """Validate a VM's OpenTofu state; returns the VM's id on its platform."""
+    return check_state_platform(name, data)[1]
+
+
+def check_state_platform(name: str, data: bytes):
+    """Validate a VM's OpenTofu state; returns (the platform that wrote it, the VM's id there)."""
     if len(data) > MAX_STATE:
         raise BackupError(f"{name}: the state file is too large")
     try:
@@ -40,7 +45,9 @@ def check_state(name: str, data: bytes) -> str:
         raise BackupError(f"{name}: the state file is not valid JSON") from None
     if not isinstance(state, dict) or state.get("version") != 4 or not isinstance(state.get("resources"), list):
         raise BackupError(f"{name}: not an OpenTofu/Terraform state file (version 4)")
-    pf = platform()
+    pf = for_state(state)
+    if pf is None:
+        raise BackupError(f"{name}: the state uses an unexpected provider")
     providers = {f'provider["{a}"]' for a in (pf.TF_PROVIDER, pf.TF_LEGACY_PROVIDER) if a}
     moid = None
     for r in state["resources"]:
@@ -61,23 +68,23 @@ def check_state(name: str, data: bytes) -> str:
             raise BackupError(f"{name}: the state has no VM in it")
         if attrs.get("name") != name:
             raise BackupError(f"{name}: the state describes a VM named {str(attrs.get('name'))[:40]!r}")
-        moid = attrs.get("moid")
+        moid = pf.state_vm_id({"resources": [r]})
         if not isinstance(moid, str) or not pf.VM_ID_RE.match(moid):
-            raise BackupError(f"{name}: the state has no valid vCenter id for the VM")
+            raise BackupError(f"{name}: the state has no valid {pf.API} id for the VM")
     if moid is None:
         raise BackupError(f"{name}: the state has no VM in it")
-    return moid
+    return pf, moid
 
 
-def check_tfvars(name: str, data: bytes) -> dict:
-    """Validate a VM's variables; returns them without connection settings."""
+def check_tfvars(name: str, data: bytes, pf=PLATFORMS["vsphere"]) -> dict:
+    """Validate a VM's variables (for the platform its state belongs to); returns them
+    without connection settings."""
     try:
         tfvars = json.loads(data)
     except ValueError:
         raise BackupError(f"{name}: the variables file is not valid JSON") from None
     if not isinstance(tfvars, dict):
         raise BackupError(f"{name}: the variables file is not an object")
-    pf = platform()
     out = {}
     for k, v in tfvars.items():
         if k in pf.TF_CONNECTION_VARS or k in pf.TF_SECRET_VARS:
@@ -87,6 +94,10 @@ def check_tfvars(name: str, data: bytes) -> dict:
         elif k in TFVARS_INTS:
             lo, hi = TFVARS_INTS[k]
             ok = isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+        elif k in pf.TF_EXTRA_VARS:
+            want = pf.TF_EXTRA_VARS[k]
+            ok = isinstance(v, want) and not isinstance(v, bool) and (
+                len(v) <= 256 if want is str else 0 <= v <= 999_999_999)
         elif k == "template_facts":
             ok = (isinstance(v, dict) and set(v) <= set(pf.TF_FACTS)
                   and all(isinstance(x, str) and len(x) <= 256 and not CONTROL_RE.search(x) for x in v.values()))
@@ -139,7 +150,11 @@ class VmRow(_Row):
     image_id: str | None = None
     notes: str = Field("", max_length=2000)
     autostart: int | None = Field(None, ge=0, le=1)   # None: not managed (and backups from before it)
+    backend_id: int | None = Field(None, ge=1)        # full backups; None: from before backends existed
+    seed_pending: int = Field(0, ge=0, le=1)
     owner_username: str | None = None   # only in VM backups: ids mean nothing on another portal
+    backend_name: str | None = Field(None, max_length=64)    # only in VM backups, like the owner
+    backend_type: str | None = Field(None, max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -184,10 +199,17 @@ class VmRow(_Row):
             raise ValueError("control characters in notes")
         return v
 
-    @field_validator("owner_username")
+    @field_validator("owner_username", "backend_name")
     @classmethod
     def _owner(cls, v):
         return _text(v, 64)
+
+    @field_validator("backend_type")
+    @classmethod
+    def _backend_type(cls, v):
+        if v is not None and v not in PLATFORMS:
+            raise ValueError("unknown backend type")
+        return v
 
 
 def rows(model: type[BaseModel], data, what: str) -> list:
@@ -242,7 +264,7 @@ class JobRow(_Row):
     id: int = Field(ge=1)
     kind: str
     target: str = Field(max_length=255)
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None
@@ -306,4 +328,31 @@ class ImageSettingRow(_Row):
     def _data(cls, v):
         if not isinstance(json.loads(v), dict):
             raise ValueError("image settings must be an object")
+        return v
+
+
+class BackendRow(_Row):
+    """A backend in a full backup. Its settings are checked like the Settings page checks
+    them (backends.validate); its secrets come from secrets.json."""
+    id: int = Field(ge=1)
+    name: str
+    type: str
+    enabled: int = Field(ge=0, le=1)
+    admin_only: int = Field(ge=0, le=1)
+    from_env: int = Field(ge=0, le=1)
+    config: dict
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        from .. import backends
+        if backends.validate_name(v) != v:
+            raise ValueError("invalid backend name")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def _type(cls, v):
+        if v not in PLATFORMS:
+            raise ValueError("unknown backend type")
         return v

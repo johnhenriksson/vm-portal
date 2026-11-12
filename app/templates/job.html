@@ -12,6 +12,13 @@
   </div>
   <div class="actions">
     <span id="job-status">{{ badge(job.status) }}</span>
+    {% if can_cancel %}
+    <form method="post" action="/jobs/{{ job.id }}/cancel" id="job-cancel"
+          data-confirm="Cancel this build? Packer stops and deletes its build VM.">
+      {{ csrf_field(request) }}
+      <button type="submit" class="btn-outline" {% if cancelling %}disabled{% endif %}>{{ "Cancelling…" if cancelling else "Cancel build" }}</button>
+    </form>
+    {% endif %}
     {% set target = links.job_target(job) %}
     {% if job.kind == "vm-destroy" %}<a href="/" class="btn btn-outline">Go to VM list</a>
     {% elif target %}<a href="{{ target }}" class="btn btn-outline">{{ "Go to VM" if job.kind.startswith("vm-") else "Go to image" }}</a>{% endif %}

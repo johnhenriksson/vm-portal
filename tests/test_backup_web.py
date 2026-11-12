@@ -19,10 +19,10 @@ def fakes(monkeypatch):
     async def no_delay():
         return None
     monkeypatch.setattr("app.main.login_failed_delay", no_delay)
-    monkeypatch.setattr(vsphere, "vms_by_name", lambda fresh=False: {})
-    monkeypatch.setattr(vsphere, "templates", lambda: [])
+    monkeypatch.setattr(vsphere, "vms_by_name", lambda b, fresh=False: {})
+    monkeypatch.setattr(vsphere, "templates", lambda b: [])
     facts = {"vm-42": good_facts()}
-    monkeypatch.setattr(vsphere, "vm_facts", lambda moid: facts.get(moid))
+    monkeypatch.setattr(vsphere, "vm_facts", lambda b, moid: facts.get(moid))
     return facts
 
 

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import RedirectResponse, Response
 from starlette.datastructures import UploadFile as StarletteUpload
 
-from . import db, jobs, provision, users
+from . import db, feedback, jobs, provision, users
 from .admin import audit, confirm_password, render_settings
 from .auth import client_ip, require_admin
 from .backup import archive, collect, restore
@@ -183,7 +183,7 @@ async def open_backup(request: Request, user: dict = Depends(require_admin), fil
             p.full_error = str(e)
     try:
         p.vm_imports = restore.plan_vm_imports(b, user)
-        await asyncio.to_thread(restore.check_vcenter, p.vm_imports)
+        await asyncio.to_thread(restore.check_backends, p.vm_imports)
     except BackupError as e:
         p.full_error = p.full_error or str(e)
     _put(p)
@@ -194,7 +194,7 @@ async def open_backup(request: Request, user: dict = Depends(require_admin), fil
 @router.post("/settings/backup/discard")
 async def discard(request: Request, user: dict = Depends(require_admin)):
     discard_pending()
-    return RedirectResponse("/settings/backup", status_code=303)
+    return feedback.redirect(request, "/settings/backup", notice="Discarded the uploaded backup.")
 
 
 @router.post("/settings/backup/import-vms")
@@ -205,7 +205,7 @@ async def import_vms(request: Request, user: dict = Depends(require_admin), toke
         return render_settings(request, "backup", status_code=400, error="Choose at least one VM to import")
     # The VMs may have changed since the preview: check again, then import without awaiting in between.
     fresh = restore.plan_vm_imports(p.backup, user)
-    await asyncio.to_thread(restore.check_vcenter, fresh)
+    await asyncio.to_thread(restore.check_backends, fresh)
     try:
         done = restore.import_vms(fresh, names, user, p.filename)
     except ValueError as e:
@@ -244,15 +244,16 @@ async def restore_full(request: Request, user: dict = Depends(require_admin), to
 
 @router.post("/settings/backup/check-vms")
 async def check_vms(request: Request, user: dict = Depends(require_admin)):
-    """After a restore or a move: does every VM's recorded id still match vCenter?"""
+    """After a restore or a move: does every VM's recorded id still match its backend?"""
+    from . import backends
     entries = []
     for vm in db.active_vms():
         moid = provision.vm_moid(vm["name"])
-        imp = restore.VmImport(vm["name"], None, b"", {}, moid or "", None)
+        imp = restore.VmImport(vm["name"], None, b"", {}, moid or "", None, backend=backends.of_vm(vm))
         if not moid:
             imp.problems.append("No OpenTofu state: the portal can only power it on or off")
         entries.append(imp)
-    await asyncio.to_thread(restore.check_vcenter, entries)
+    await asyncio.to_thread(restore.check_backends, entries)
     return render_settings(request, "backup", vm_check=entries)
 
 
@@ -274,12 +275,16 @@ async def state_history_restore(request: Request, name: str, version: str, user:
         await asyncio.to_thread(confirm_password, request, user, confirm, f"vm.state_rollback {name}",
                                 "Enter your password to roll back the VM's state")
         data = match[0].read_bytes()
-        moid = restore.check_state(name, data)
+        from . import backends
+        pf, moid = restore.check_state_platform(name, data)
         current = provision.vm_moid(name)
         if current and current != moid:
-            raise ValueError(f"That version belongs to another VM in vCenter ({moid}, now {current})")
-        imp = restore.VmImport(name, None, data, {}, moid, None)
-        await asyncio.to_thread(restore.check_vcenter, [imp])
+            raise ValueError(f"That version belongs to another VM in {pf.API} ({moid}, now {current})")
+        b = backends.of_vm(vm)
+        if b is None or b.type != pf.NAME:
+            raise ValueError("That version is from another kind of backend than the VM's")
+        imp = restore.VmImport(name, None, data, {}, moid, None, backend=b)
+        await asyncio.to_thread(restore.check_backends, [imp])
         if imp.problems:
             raise ValueError(imp.problems[0])
         if jobs.is_locked(f"vm:{name}"):
@@ -289,13 +294,15 @@ async def state_history_restore(request: Request, name: str, version: str, user:
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
     audit(request, user, "vm.state_rolled_back", f"{name} to {version}")
-    return RedirectResponse(f"/vms/{name}", status_code=303)
+    return feedback.redirect(request, f"/vms/{name}", notice=f"Rolled {name}'s state back to the copy from"
+                             f" {version[:4]}-{version[4:6]}-{version[6:8]} {version[9:11]}:{version[11:13]} UTC."
+                             " The copy it replaced was kept.")
 
 
 @router.post("/vms/{name}/forget")
 async def vm_forget(request: Request, name: str, user: dict = Depends(require_admin),
                     typed: str = Form(""), confirm: str = Form("")):
-    """Remove a VM from this portal and leave it running in vCenter: after moving it to
+    """Remove a VM from this portal and leave it running on its backend: after moving it to
     another portal, so two portals never manage the same VM."""
     vm = db.active_vm(name)
     if not vm:

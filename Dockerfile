@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1
 
-# --- tools: download and verify OpenTofu, Packer, the vSphere provider and plugin ---------
+# --- tools: download and verify OpenTofu, Packer, the providers and plugins ---------------
 FROM python:3.12-slim-bookworm AS tools
 
 ARG TOFU_VERSION=1.13.8
 ARG PACKER_VERSION=1.16.2
 ARG PACKER_VSPHERE_PLUGIN_VERSION=2.5.1
+ARG PACKER_PROXMOX_PLUGIN_VERSION=1.2.4
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg unzip \
@@ -37,15 +38,17 @@ RUN set -eux; \
     unzip -q "packer_${PACKER_VERSION}_linux_amd64.zip" packer -d /out; \
     /out/tofu version; /out/packer version
 
-# Packer plugin (checksum-verified by `packer plugins install` against the release's SHA256SUMS).
+# Packer plugins (checksum-verified by `packer plugins install` against the release's SHA256SUMS).
 ENV PACKER_PLUGIN_PATH=/opt/packer-plugins
-RUN /out/packer plugins install github.com/hashicorp/vsphere v${PACKER_VSPHERE_PLUGIN_VERSION}
+RUN /out/packer plugins install github.com/hashicorp/vsphere v${PACKER_VSPHERE_PLUGIN_VERSION} \
+ && /out/packer plugins install github.com/hashicorp/proxmox v${PACKER_PROXMOX_PLUGIN_VERSION}
 
-# vSphere provider for VM jobs, baked in so jobs never download from a registry.
-# Mirrored under both registry hostnames so state from Terraform-era VMs still resolves.
-COPY terraform/vm /tmp/module
+# The providers for VM jobs (vSphere, Proxmox VE), baked in so jobs never download from a
+# registry. Mirrored under both registry hostnames so state from Terraform-era VMs still resolves.
+COPY terraform /tmp/modules
 RUN set -eux; \
-    /out/tofu -chdir=/tmp/module providers mirror /opt/tofu-mirror; \
+    /out/tofu -chdir=/tmp/modules/vm providers mirror /opt/tofu-mirror; \
+    /out/tofu -chdir=/tmp/modules/proxmox providers mirror /opt/tofu-mirror; \
     ln -s registry.opentofu.org /opt/tofu-mirror/registry.terraform.io; \
     ls -R /opt/tofu-mirror | head -20
 

@@ -1,10 +1,11 @@
 {% from "_fields.html" import field, select %}
 {% if error_text %}
-  <div class="alert">Couldn't load resources from vCenter: {{ error_text }}</div>
+  <div class="alert">Couldn't load resources from {{ api }}: {{ error_text }}</div>
   <p class="muted">You can still type the names yourself.</p>
   <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
 {% else %}
   <div class="alert ok">Connected to {{ about }}</div>
-  {% if not selects[0].options %}<div class="alert warn">vCenter has no datacenters, or this user can't see them.</div>{% endif %}
-  <div class="grid-2">{% for f in selects %}{{ select(f) }}{% endfor %}</div>
+  {% if not selects[0].options %}<div class="alert warn">{{ api }} has no {{ "nodes that are online" if api == "Proxmox" else "datacenters" }}, or this {{ "API token" if api == "Proxmox" else "user" }} can't see them.</div>{% endif %}
+  {% for w in warnings or [] %}<div class="alert warn">{{ w }}</div>{% endfor %}
+  <div class="grid-2">{% for f in selects %}{% if f.options is defined %}{{ select(f) }}{% else %}{{ field(f) }}{% endif %}{% endfor %}</div>
 {% endif %}

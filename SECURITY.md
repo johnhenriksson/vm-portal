@@ -8,10 +8,10 @@ a public issue. Include steps to reproduce and the version or commit.
 
 ## Threat model in short
 
-vm-portal holds powerful credentials (a vCenter account) and runs Terraform/OpenTofu
-and Packer. Treat it like infrastructure tooling:
+vm-portal holds powerful credentials (vCenter accounts, Proxmox VE API tokens) and
+runs Terraform/OpenTofu and Packer. Treat it like infrastructure tooling:
 
-- **Admins are fully trusted.** They configure vCenter, manage users and build
+- **Admins are fully trusted.** They configure backends, manage users and build
   images. With image editing turned on (Settings → Images) they can also edit
   Packer definitions, which is equivalent to running code inside the portal
   container. Turning it on requires the admin's password and is audited; set
@@ -22,11 +22,13 @@ and Packer. Treat it like infrastructure tooling:
   Settings → Security (or set `HTTPS_ONLY_COOKIES=true`). The portal only lets
   you turn it on from an HTTPS connection, so it can't lock everyone out.
   Don't expose it to the internet unless you have to.
-- Use a dedicated vCenter account with only the permissions in the README.
+- Use a dedicated vCenter account and a dedicated Proxmox API token (never a
+  password) with only the permissions in the README. Give a token
+  `Datastore.Allocate` only on an ISO storage that holds no VM disks.
 - Set up backups (Settings → Backup, see [`docs/backup.md`](docs/backup.md)).
-  A backup holds the stored vCenter password and every user's password hash,
-  so keep backups and their passphrases or secret keys as secret as the vCenter
-  password. Scheduled backups are encrypted to age public keys: keep the secret
+  A backup holds the backends' stored secrets and every user's password hash,
+  so keep backups and their passphrases or secret keys as secret as those
+  credentials. Scheduled backups are encrypted to age public keys: keep the secret
   keys off the portal's host, so a compromised portal can't read its backups.
   If you copy the raw data volume instead, that copy also holds the encryption
   key (unless `ENCRYPTION_KEY` is set elsewhere) and the Packer build key.
@@ -46,15 +48,28 @@ and Packer. Treat it like infrastructure tooling:
 - Turning on a sensitive switch (image editing, HTTPS only) needs the admin's
   password, so a stolen session can't quietly do it.
 - Secrets encrypted at rest (Fernet) and never sent back to the browser;
-  changing the vCenter server requires re-entering its password.
+  changing a backend's server requires re-entering its secret, and a secret set
+  in the environment never goes to another server than the one it was set for.
+- TLS is always verified for Proxmox VE: against the system's CAs, or against a
+  pinned SHA-256 fingerprint (the portal then gives OpenTofu and Packer exactly
+  that certificate as `SSL_CERT_FILE`). Nothing is sent, the token included,
+  before the certificate checks out.
 - Child processes (OpenTofu, Packer) get a minimal environment, never the
-  portal's own secrets. Saved OpenTofu plans (they contain the vCenter
-  password) are written to a 0700 folder and deleted as soon as the resize job ends.
-- Browser console: ESXi certificate pinned to the thumbprint from vCenter;
-  Origin, session and ownership checked; session limits.
+  portal's own secrets, and only the secret of the backend they work on. Saved
+  OpenTofu plans (they contain that secret) are written to a 0700 folder and
+  deleted as soon as the resize job ends. Job logs never show any backend's secret.
+- Browser console: on vSphere the ESXi certificate is pinned to the thumbprint
+  from vCenter; on Proxmox the node's certificate is the backend's pinned (or
+  trusted) one, and the portal answers the VNC password challenge itself, so
+  the browser never gets a ticket or a password. Origin, session and ownership
+  checked; session limits.
 - VMs: SSH key-only; optional console password stored only as a bcrypt hash;
-  cloud-init data marked sensitive and redacted from vCenter after first boot;
-  template build keys removed from every template.
+  cloud-init data marked sensitive and redacted from vCenter after first boot.
+  On Proxmox it travels on a seed ISO in the backend's ISO storage, replaced
+  after the first boot by a copy without keys, hash or compose file (the VM page
+  says when that couldn't happen yet); destroying the VM deletes it. The portal
+  only ever deletes its own seed ISOs. Template build keys removed from every
+  template.
 - Container: non-root user, all Linux capabilities dropped except `NET_RAW`
   (ping), tool downloads verified against publishers' signatures.
 - Backups always encrypted (age: passphrase or public keys); nothing in them is
@@ -63,11 +78,13 @@ and Packer. Treat it like infrastructure tooling:
     limits, and per-file checksums.
   - **Database:** rows are validated with the UI's own rules and imported into a
     fresh database; a SQLite file from a backup is never opened.
-  - **OpenTofu state:** limited to the portal's own module. An imported VM's id
-    must match that VM in vCenter, in the portal's datacenter and folder, and the
-    VM must be one vm-portal created.
-  - **Secrets:** re-encrypted with the target's own key, so the encryption key is
-    never in a backup.
+  - **OpenTofu state:** limited to the portal's own module for the state's
+    platform. An imported VM's id must match that VM on its backend, in the
+    backend's datacenter and folder (or pool), and the VM must be one vm-portal
+    created.
+  - **Backends:** checked like the Settings page checks them; their secrets are
+    re-encrypted with the target's own key, so the encryption key is never in a
+    backup.
   - **Afterwards:** a full restore ends every session (new session epoch), even
     with `SECRET_KEY` set in the environment.
   - **Uploads:** an opened backup stays in memory only, bound to the admin's

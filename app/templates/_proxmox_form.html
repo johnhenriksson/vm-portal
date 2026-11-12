@@ -1,0 +1,23 @@
+{# A Proxmox VE backend: connection fields + placement dropdowns loaded from Proxmox. Needs: fields, has_creds, placement_url. #}
+{% from "_fields.html" import field %}
+<h2 class="sub-head" style="margin-top:0">Connection</h2>
+<p class="muted">The portal signs in with an API token (Datacenter &gt; Permissions &gt; API Tokens), never a
+  password. The secret is encrypted at rest and never shown again after saving. Changing the server requires
+  re-entering it.</p>
+<div class="grid-2">{% for f in fields[:3] %}{{ field(f) }}{% endfor %}</div>
+{{ field(fields[3]) }}
+<div class="row" style="margin-bottom:1.5rem">
+  <button type="button" class="btn-outline" hx-post="{{ placement_url }}" hx-target="#placement"
+          hx-vals='{"fresh": "1"}' hx-indicator="#connect-spinner">Connect</button>
+  <span id="connect-spinner" class="htmx-indicator" aria-busy="true">Connecting to Proxmox…</span>
+</div>
+
+<h2 class="sub-head">Placement</h2>
+<p class="muted">Where new VMs and templates go. The choices come from Proxmox once connected.</p>
+<div id="placement" {% if has_creds %}hx-post="{{ placement_url }}" hx-trigger="load"{% endif %}>
+  {% if has_creds %}
+    <p class="muted" aria-busy="true">Loading resources from Proxmox…</p>
+  {% else %}
+    <div class="empty-state" style="padding:1.5rem"><p style="margin:0">Enter the connection details and click <strong>Connect</strong>.</p></div>
+  {% endif %}
+</div>

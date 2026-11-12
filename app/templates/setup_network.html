@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_fields.html" import field, stepbar %}
 {% block title %}Set up network · VM Portal{% endblock %}
-{% block banner %}{{ stepbar(["Admin account", "vCenter", "Network & SSH keys"], 3) }}{% endblock %}
+{% block banner %}{{ stepbar(["Admin account", "Backend", "Network & SSH keys"], 3) }}{% endblock %}
 {% block content %}
 <div class="page-head"><div>
   <h1>Network and SSH keys</h1>
@@ -9,10 +9,12 @@
 </div></div>
 <form method="post" action="/setup/network" class="settings-form">
   {{ csrf_field(request) }}
-  <h2 class="sub-head" style="margin-top:0">Static IP pool</h2>
-  <p class="muted">Static IPs are offered from this pool. Leave it empty to only allow DHCP.</p>
-  <div class="grid-2">{% for f in fields[:-1] %}{{ field(f) }}{% endfor %}</div>
-  {{ field(fields[-1]) }}
+  {% if backend %}
+  <h2 class="sub-head" style="margin-top:0">Static IP pool on {{ backend.name }}</h2>
+  <p class="muted">Static IPs for VMs on this backend are offered from this pool. Leave it empty to only allow DHCP.
+    Each backend has its own pool.</p>
+  <div class="grid-2">{% for f in fields %}{{ field(f) }}{% endfor %}</div>
+  {% endif %}
 
   <h2 class="sub-head">Default SSH keys</h2>
   {% if "default_ssh_keys" in locked %}

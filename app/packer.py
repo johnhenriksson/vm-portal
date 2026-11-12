@@ -10,9 +10,8 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from . import images, jobs
-from .config import get_settings, vcenter_configured
-from .platforms import current as platform
+from . import backends, images, jobs
+from .config import get_settings
 
 LOCK_PREFIX = "packer:"
 MAX_PARALLEL_BUILDS = 2
@@ -70,17 +69,17 @@ def regenerate_key() -> None:
     ensure_key()
 
 
-def http_ip() -> str:
+def http_ip(b) -> str:
     """Address build VMs reach the portal at, for Packer's HTTP server.
 
     Packer would otherwise guess, and with host networking it can pick a Docker
-    bridge. The source address of the route to vCenter is a far better guess; the
-    setting overrides it. No packets are sent: connecting a UDP socket only picks a route.
+    bridge. The source address of the route to the backend's API is a far better guess;
+    the setting overrides it. No packets are sent: connecting a UDP socket only picks a route.
     """
     s = get_settings()
     if s.packer_http_ip:
         return s.packer_http_ip
-    host = platform().api_host()
+    host = b.platform.api_host(b)
     try:
         addr = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -90,34 +89,40 @@ def http_ip() -> str:
         return ""  # let Packer choose
 
 
-def packer_env(img: images.ImageDef, cfg: images.ImageConfig, template_name: str) -> dict[str, str]:
-    """PKR_VAR_* for a build: the portal's standard variables plus the image's parameters.
+def packer_env(img: images.ImageDef, cfg: images.ImageConfig, template_name: str, b) -> dict[str, str]:
+    """PKR_VAR_* for a build on this backend: its connection and placement, the portal's
+    standard variables and the image's parameters.
 
     Packer ignores PKR_VAR_* for variables a definition doesn't declare, so every
     definition can pick the ones it needs (see images/README.md).
     """
-    s = get_settings()
     env = {
-        **platform().packer_vars(),
+        **b.platform.packer_vars(b),
         "PKR_VAR_vm_name": template_name,
         "PKR_VAR_template_prefix": img.manifest.template_prefix,
         "PKR_VAR_vm_cpu_num": str(cfg.cpus),
         "PKR_VAR_vm_mem_size": str(cfg.memory_mb),
         "PKR_VAR_vm_disk_size": str(cfg.disk_mb),
-        "PKR_VAR_iso_url": cfg.iso_url,
+        "PKR_VAR_iso_url": images.iso_for(cfg, b),
         "PKR_VAR_ssh_private_key_file": str(ensure_key()),
         # Packer parses complex PKR_VAR_* values as HCL; a JSON list is valid HCL.
         "PKR_VAR_ssh_authorized_keys": json.dumps([public_key()]),
-        "PKR_VAR_http_ip": http_ip(),
+        "PKR_VAR_http_ip": http_ip(b),
     }
     for name, value in cfg.params.items():  # validated against the manifest's patterns
         env[f"PKR_VAR_{name}"] = value
     return env
 
 
-def preflight(img: images.ImageDef | None = None, cfg: images.ImageConfig | None = None) -> list[str]:
-    """Problems that would make a build fail immediately. Without an image: the shared ones."""
-    s = get_settings()
+def build_backends(img: images.ImageDef) -> list:
+    """The backends this image can be built on: enabled, set up, of a type it supports."""
+    return [b for b in backends.all_backends()
+            if b.enabled and b.configured and b.platform.CAN_PROVISION and images.builds_on(img, b)]
+
+
+def preflight(img: images.ImageDef | None = None, cfg: images.ImageConfig | None = None, b=None) -> list[str]:
+    """Problems that would make a build fail immediately. Without an image: the shared ones.
+    With an image but no backend: whether it can be built anywhere."""
     problems = []
     if img is not None:
         if not img.usable:
@@ -125,8 +130,18 @@ def preflight(img: images.ImageDef | None = None, cfg: images.ImageConfig | None
         cfg = cfg or images.config(img)
         if not cfg.enabled:
             problems.append("The image is disabled")
-        if not cfg.iso_url:
-            problems.append("Choose the installer ISO in the image's settings")
+        if b is not None:
+            if not images.builds_on(img, b):
+                problems.append(f"The definition has no {b.platform.PACKER_SOURCE} source, so it can't be built "
+                                f"on {b.name}")
+            elif not b.configured:
+                problems.append(f"{b.name} isn't fully set up (Settings → Backends)")
+            elif not b.enabled:
+                problems.append(f"{b.name} is disabled")
+            elif not images.iso_for(cfg, b):
+                problems.append(f"Choose the installer ISO for {b.name} in the image's settings")
+        elif not build_backends(img):
+            problems.append("No enabled backend can build it (" + ", ".join(img.manifest.platforms) + ")")
     path, generated = key_source()
     if not generated and not path.is_file():
         problems.append(f"Build SSH key {path} not found")
@@ -135,8 +150,6 @@ def preflight(img: images.ImageDef | None = None, cfg: images.ImageConfig | None
             public_key()
         except (OSError, ValueError) as e:
             problems.append(f"Build SSH key {path} can't be used: {e}")
-    if not vcenter_configured(s):
-        problems.append("vCenter is not configured (Settings → vCenter)")
     for tool in ("packer", "xorriso"):
         if not shutil.which(tool):
             problems.append(f"{tool} is not installed")
@@ -147,14 +160,16 @@ def prune_candidates(names_newest_first: list[str], keep: int) -> list[str]:
     return names_newest_first[max(keep, 1):]
 
 
-def lock_key(image_id: str) -> str:
-    return f"{LOCK_PREFIX}{image_id}"
+def lock_key(image_id: str, backend_id: int) -> str:
+    return f"{LOCK_PREFIX}{image_id}:{backend_id}"
 
 
-def building(image_id: str | None = None) -> bool:
-    if image_id:
-        return jobs.is_locked(lock_key(image_id))
-    return any(jobs.is_locked(k) for k in jobs.lock_keys() if k.startswith(LOCK_PREFIX))
+def building(image_id: str | None = None, backend_id: int | None = None) -> bool:
+    """A build is running (of this image; on this backend)."""
+    if image_id and backend_id is not None:
+        return jobs.is_locked(lock_key(image_id, backend_id))
+    prefix = f"{LOCK_PREFIX}{image_id}:" if image_id else LOCK_PREFIX
+    return any(jobs.is_locked(k) for k in jobs.lock_keys() if k.startswith(prefix))
 
 
 _slots: asyncio.Semaphore | None = None
@@ -176,11 +191,13 @@ def COPY_IGNORE(directory: str, names: list[str]) -> set[str]:
     return set(_IGNORE(directory, names)) | {n for n in names if os.path.islink(os.path.join(directory, n))}
 
 
-def start_build(img: images.ImageDef, user_id: int | None = None) -> int:
+def start_build(img: images.ImageDef, b, user_id: int | None = None) -> int:
+    """Build a new template of this image on one backend, then prune that backend's old ones."""
     s = get_settings()
     cfg = images.config(img)
     prefix = img.manifest.template_prefix
     name = f"{prefix}-{datetime.now():%Y%m%d-%H%M}"
+    pf = b.platform
 
     async def run(job_id: int, log: jobs.JobLog) -> None:
         async with _build_slots():
@@ -188,21 +205,22 @@ def start_build(img: images.ImageDef, user_id: int | None = None) -> int:
             log.step(f"Copying image definition {img.id} -> {work}")
             shutil.copytree(img.path, work, ignore=COPY_IGNORE)
             try:
-                env = await asyncio.to_thread(packer_env, img, cfg, name)  # resolves vCenter
-                log.step(f"Building template {name}")
+                env = await asyncio.to_thread(packer_env, img, cfg, name, b)  # resolves the backend's API
+                log.step(f"Building template {name} on {b.name}")
                 await log.run(["packer", "init", "."], cwd=work, env=env)
-                await log.run(["packer", "build", "-color=false", "-on-error=cleanup", "."], cwd=work, env=env)
+                await log.run(["packer", "build", "-color=false", "-on-error=cleanup",
+                               f"-only={pf.PACKER_SOURCE}.*", "."], cwd=work, env=env)
             finally:
                 shutil.rmtree(work, ignore_errors=True)
 
-        log.step(f"Pruning {prefix}-* templates (keeping the newest {cfg.keep})")
-        ts = await asyncio.to_thread(platform().templates)
+        log.step(f"Pruning {prefix}-* templates on {b.name} (keeping the newest {cfg.keep})")
+        ts = await asyncio.to_thread(pf.templates, b)
         mine = [t.name for t in ts if images.for_template(t.name) is not None
                 and images.for_template(t.name).id == img.id]
         for old in prune_candidates(mine, cfg.keep):
             log.write(f"Deleting old template {old}\n")
-            await asyncio.to_thread(platform().delete_template, old)
+            await asyncio.to_thread(pf.delete_template, b, old)
         if not prune_candidates(mine, cfg.keep):
             log.write("Nothing to prune\n")
 
-    return jobs.submit("packer-build", name, run, lock_key=lock_key(img.id), user_id=user_id)
+    return jobs.submit("packer-build", name, run, lock_key=lock_key(img.id, b.id), user_id=user_id)

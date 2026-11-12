@@ -1,4 +1,6 @@
-"""cloud-init via VMware guestinfo (Linux templates with cloud-init's VMware datasource)."""
+"""cloud-init for Linux templates: the metadata and user-data a new VM gets. On vSphere they
+travel as guestinfo (cloud-init's VMware datasource); on Proxmox VE on a NoCloud seed ISO
+(platforms/proxmox.py turns this metadata into its files)."""
 import uuid
 
 import yaml
@@ -16,7 +18,6 @@ class CloudInit:
         return {"metadata": self.metadata(req), "userdata": self.userdata(req)}
 
     def metadata(self, req) -> str:
-        s = get_settings()
         md: dict = {
             # Unique per VM, so cloud-init always treats a clone as a new instance.
             "instance-id": f"{req.name}-{uuid.uuid4().hex[:8]}",
@@ -26,26 +27,38 @@ class CloudInit:
             "redact": ["userdata"],
             "cleanup-guestinfo": ["userdata"],  # name used by older cloud-init versions
         }
+        iface = req.network_interface
+        if not req.ip and req.image_id and iface.endswith("*"):
+            # DHCP on the portal's netplan images (Ubuntu): ask with the NIC's MAC as the client
+            # id. netplan's default is a DUID made from the machine-id, and a VM came back
+            # from a reboot with another address that way. The MAC stays the VM's for life.
+            # Only for the portal's own images: other templates keep cloud-init's fallback,
+            # which works whatever renders their network.
+            md["network"] = {"version": 2, "ethernets": {"nic0": {
+                "match": {"name": iface}, "dhcp4": True, "dhcp-identifier": "mac"}}}
         if req.ip:
-            iface = req.network_interface
+            # The network of the VM's backend (its pool settings), never a global one.
+            if not req.ip_gateway:
+                raise ValueError("A static IP needs the backend's gateway")
+            dns = [x for x in req.ip_dns if x] or [req.ip_gateway]
             if iface.endswith("*"):
                 # netplan (Ubuntu): cloud-init hands the config to netplan, which matches a glob.
-                key, extra = "nic0", {"match": {"name": iface}, "routes": [{"to": "default", "via": s.ip_gateway}]}
+                key, extra = "nic0", {"match": {"name": iface}, "routes": [{"to": "default", "via": req.ip_gateway}]}
             else:
                 # ifupdown (Debian), NetworkManager/sysconfig (RHEL family): cloud-init converts the
                 # config itself. Its converter rejects `to: default`, which leaves the VM with no
                 # network at all, and renders routes for ifupdown with `route` (net-tools, not
                 # installed). gateway4 becomes each renderer's native gateway setting. These
                 # renderers only use the key as the interface name, so images give the exact name.
-                key, extra = iface, {"gateway4": s.ip_gateway}
+                key, extra = iface, {"gateway4": req.ip_gateway}
             md["network"] = {
                 "version": 2,
                 "ethernets": {
                     key: {
                         "dhcp4": False,
-                        "addresses": [f"{req.ip}/{s.ip_prefix}"],
+                        "addresses": [f"{req.ip}/{req.ip_prefix}"],
                         **extra,
-                        "nameservers": {"addresses": s.ip_dns or [s.ip_gateway]},
+                        "nameservers": {"addresses": dns},
                     }
                 },
             }

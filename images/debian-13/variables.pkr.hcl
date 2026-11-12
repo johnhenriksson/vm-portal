@@ -1,18 +1,37 @@
 # Variables the portal sets for every build (see images/README.md) ...
-variable "vsphere_server" { type = string }
-variable "vsphere_user" { type = string }
+variable "vsphere_server" {
+  type    = string
+  default = ""
+}
+variable "vsphere_user" {
+  type    = string
+  default = ""
+}
 variable "vsphere_password" {
   type      = string
+  default   = ""
   sensitive = true
 }
 variable "vsphere_insecure" {
   type    = bool
   default = false
 }
-variable "vsphere_datacenter" { type = string }
-variable "vsphere_cluster" { type = string }
-variable "vsphere_datastore" { type = string }
-variable "vsphere_network" { type = string }
+variable "vsphere_datacenter" {
+  type    = string
+  default = ""
+}
+variable "vsphere_cluster" {
+  type    = string
+  default = ""
+}
+variable "vsphere_datastore" {
+  type    = string
+  default = ""
+}
+variable "vsphere_network" {
+  type    = string
+  default = ""
+}
 variable "vsphere_folder" {
   type    = string
   default = ""
@@ -79,4 +98,53 @@ variable "locale" {
 variable "guest_os_type" {
   type    = string
   default = "debian12_64Guest"
+}
+
+# --- Proxmox VE (builds on a Proxmox backend; set by the portal) -------------------------
+variable "proxmox_url" {
+  type        = string
+  default     = ""
+  description = "https://<node>:8006/api2/json"
+}
+
+variable "proxmox_token_id" {
+  type    = string
+  default = ""
+}
+
+variable "proxmox_token_secret" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "proxmox_node" {
+  type    = string
+  default = ""
+}
+
+variable "proxmox_storage" {
+  type    = string
+  default = ""
+}
+
+variable "proxmox_iso_storage" {
+  type    = string
+  default = ""
+}
+
+variable "proxmox_bridge" {
+  type    = string
+  default = ""
+}
+
+variable "proxmox_pool" {
+  type    = string
+  default = ""
+}
+
+variable "proxmox_vlan" {
+  type        = string
+  default     = ""
+  description = "VLAN tag of the build VM's network card (the backend's setting); empty = untagged"
 }

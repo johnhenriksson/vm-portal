@@ -43,18 +43,18 @@
   <div class="card-body">
   {% if p.vm_imports %}
     <p class="muted">Adds the VMs to this portal, or replaces the state of ones it already has (the current state is kept
-      in the VM's history). Each VM was checked in vCenter: its id must belong to that VM, in this portal's datacenter
-      and folder, and vm-portal must have created it.</p>
+      in the VM's history). Each VM was checked on its backend: its id must belong to that VM, in the backend's datacenter
+      and folder (or pool), and vm-portal must have created it.</p>
     <form method="post" action="/settings/backup/import-vms">
       {{ csrf_field(request) }}<input type="hidden" name="token" value="{{ p.token }}">
       <div class="table-wrap"><table>
-        <thead><tr><th></th><th>VM</th><th>vCenter id</th><th>Owner in the backup</th><th>Check</th></tr></thead>
+        <thead><tr><th></th><th>VM</th><th>Backend · id</th><th>Owner in the backup</th><th>Check</th></tr></thead>
         <tbody>
         {% for i in p.vm_imports %}
           <tr>
             <td>{% if i.ok %}<input type="checkbox" name="names" value="{{ i.name }}" aria-label="Import {{ i.name }}">{% endif %}</td>
             <td class="mono">{{ i.name }}</td>
-            <td class="mono muted">{{ i.moid or "–" }}</td>
+            <td><span>{{ i.backend.name if i.backend else "–" }}</span> <span class="mono muted">{{ i.moid or "–" }}</span></td>
             <td>{{ i.owner or "–" }}</td>
             <td>{% if i.ok %}<span class="badge ready plain">{{ "Replace state" if i.replace else "Ready" }}</span>
                 {% for n in i.notes %}<div class="hint">{{ n }}</div>{% endfor %}

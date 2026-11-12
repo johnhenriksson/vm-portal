@@ -25,8 +25,9 @@ site/screenshots/run.sh
 ```
 
 This runs the real portal (`demo_server.py`) with invented data: fictional users,
-`192.0.2.0/24` addresses (reserved for documentation), `example.com` names, and
-a fake vCenter that exists only in that script; the portal has no demo mode.
+`192.0.2.0/24` and `198.51.100.0/24` addresses (reserved for documentation),
+`example.com` names, and a fake vCenter and a fake Proxmox VE cluster that exist
+only in that script; the portal has no demo mode.
 Headless Chromium from the Playwright image takes the screenshots, as WebP.
 Needs Docker and the project's `.venv`. The Pages workflow runs the same script
 before every deploy, so the published page always matches the pushed code; run
@@ -43,7 +44,8 @@ site/video/run.sh /tmp/out wide   # one of them
 ```
 
 Clicks through the same demo portal with headless Chromium (`record.py`):
-dashboard, creating a VM with its job log streaming, the VM page (power, resize,
+dashboard, picking the Proxmox VE backend and creating a VM with its job log
+streaming, the VM page (power, resize,
 autostart), images and backups. Frames are screenshots, so text stays sharp; the
 cursor is drawn into the page. `compose.py` adds the captions and title cards and
 encodes H.264 MP4 with ffmpeg from Ubuntu's archive (`ffmpeg.Dockerfile`, built

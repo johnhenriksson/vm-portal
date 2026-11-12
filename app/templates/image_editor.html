@@ -14,7 +14,7 @@
   {% else %}Editing is disabled. An admin can turn it on under <a href="/settings/templates">Settings → Images</a>.{% endif %}
 </div>
 {% else %}
-<div class="alert warn">Image definitions are code: Packer runs them inside the portal with access to vCenter.
+<div class="alert warn">Image definitions are code: Packer runs them inside the portal with access to the backends.
   Only make changes you understand; every change is audited and can be restored below.</div>
 {% endif %}
 {% if img.error %}<div class="alert">{{ img.error }}</div>{% endif %}

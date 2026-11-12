@@ -8,19 +8,30 @@
 <div class="page-head">
   <div class="name-cell">{{ os_icon(m.os.distro if m else "") }}
     <div><h1 style="margin:0">{{ m.name if m else img.id }}</h1>
-      <p class="sub" style="margin:0">{{ img.id }} · {{ "built-in" if img.builtin else "custom" }}{% if m %} · templates <code>{{ m.template_prefix }}-*</code> · guest {{ m.guest }}{% endif %}</p></div>
+      <p class="sub" style="margin:0">{{ img.id }} · {{ "built-in" if img.builtin else "custom" }}{% if m %} · templates <code>{{ m.template_prefix }}-*</code> · guest {{ m.guest }} · builds on {{ m.platforms | join(", ") }}{% endif %}</p></div>
   </div>
   <div class="actions">
     <a href="/images/defs/{{ img.id }}/files" class="btn btn-outline">{{ "Edit files" if (not img.builtin and editing_enabled) else "View files" }}</a>
-    {% if m and not problems and not building %}
-    <form method="post" action="/images/defs/{{ img.id }}/build" data-confirm="Build a new {{ m.name }} template? It takes a while.">
-      {{ csrf_field(request) }}<button>Build template</button></form>
-    {% elif building %}<span class="badge running">Building</span>{% endif %}
+    {% set ready = targets | selectattr("problems", "equalto", []) | rejectattr("building") | list %}
+    {% if m and not problems and ready %}
+    <form method="post" action="/images/defs/{{ img.id }}/build" class="row" data-confirm="Build a new {{ m.name }} template? It takes a while.">
+      {{ csrf_field(request) }}
+      {% if ready | length > 1 %}
+      <select name="backend_id" aria-label="Backend to build on">
+        {% for t in ready %}<option value="{{ t.backend.id }}">{{ t.backend.name }}</option>{% endfor %}
+      </select>
+      {% else %}<input type="hidden" name="backend_id" value="{{ ready[0].backend.id }}">{% endif %}
+      <button>Build template{% if ready | length == 1 and backend_count > 1 %} on {{ ready[0].backend.name }}{% endif %}</button></form>
+    {% endif %}
+    {% if building %}<span class="badge running">Building</span>{% endif %}
   </div>
 </div>
 
 {% if problems %}<div class="alert warn"><strong>Can't build yet:</strong>
   <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul></div>{% endif %}
+{% set blocked = targets | rejectattr("problems", "equalto", []) | list %}
+{% if not problems and blocked %}<div class="alert warn"><strong>Can't build on every backend yet:</strong>
+  <ul>{% for t in blocked %}<li>{{ t.problems | join("; ") }}</li>{% endfor %}</ul></div>{% endif %}
 
 {% if m %}
 <p class="muted" style="max-width:52rem">{{ m.description }}</p>
@@ -30,11 +41,15 @@
     <span><span class="label">Enabled</span><span class="hint">Disabled images can't be built and aren't offered when creating VMs.</span></span></label>
 
   <h2 class="sub-head">Installer</h2>
-  <div id="iso-picker" hx-get="/images/defs/{{ img.id }}/isos" hx-trigger="load">
-    <label class="field"><span class="label">Installer ISO</span>
-      <input type="text" name="iso_url" value="{{ cfg.iso_url }}" class="mono" autocomplete="off">
-      <span class="hint" aria-busy="true">Looking for ISO files on the datastores…</span></label>
+  {% for b in iso_backends %}
+  <div class="iso-picker" hx-get="/images/defs/{{ img.id }}/isos?backend={{ b.id }}" hx-trigger="load">
+    <label class="field"><span class="label">Installer ISO on {{ b.name }}</span>
+      <input type="text" name="iso_{{ b.id }}" value="{{ cfg.isos.get(b.id | string, '') }}" class="mono" autocomplete="off">
+      <span class="hint" aria-busy="true">Looking for ISO files on {{ b.name }}…</span></label>
   </div>
+  {% else %}
+  <p class="muted">No backend this image can be built on is set up yet ({{ m.platforms | join(", ") }}).</p>
+  {% endfor %}
 
   <h2 class="sub-head">Build</h2>
   <div class="grid-2">
@@ -85,7 +100,7 @@
 <div class="section card danger-zone" style="max-width:52rem">
   <div class="card-head">Delete definition</div>
   <div class="card-body">
-    <p>Moves the definition to the data volume's <code>images/.deleted</code> folder. Templates already built stay in vCenter.</p>
+    <p>Moves the definition to the data volume's <code>images/.deleted</code> folder. Templates already built stay where they are.</p>
     <form method="post" action="/images/defs/{{ img.id }}/delete" class="row" style="align-items:flex-end">
       {{ csrf_field(request) }}
       <label class="field" style="margin:0;flex:1;max-width:22rem"><span class="label">Type <code>{{ img.id }}</code> to confirm</span>

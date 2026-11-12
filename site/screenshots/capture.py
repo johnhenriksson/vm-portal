@@ -58,7 +58,11 @@ def main() -> None:
         page.wait_for_url(BASE + "/")
 
         shot(page, "/", "dashboard")
-        shot(page, "/vms/new", "create-vm")
+        shot(page, "/vms/new?backend=2", "create-vm")      # the Proxmox cluster: with a node to pick
+        shot(page, "/settings/backends", "backends")
+        shot(page, "/settings/backends/2", "backend-proxmox", wait="#placement select",
+             prepare=lambda pg: pg.evaluate("document.querySelector('#placement').scrollIntoView({block: 'start'});"
+                                            " window.scrollBy(0, -90)"))
         shot(page, "/vms/web-01", "vm-detail")
         shot(page, "/images?tab=definitions", "images",
              prepare=lambda pg: pg.evaluate("document.querySelector('details.new-def').open = false"))

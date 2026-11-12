@@ -4,7 +4,8 @@
 {% from "_links.html" import link %}
 {% block title %}{{ vm.name }} · VM Portal{% endblock %}
 {% block content %}
-{% set ip = (info.ip if info else None) or vm.ip %}
+{# Never a link-local address: VMs recorded before the portal filtered them may still have one. #}
+{% set ip = (info.ip if info else None) or (vm.ip if vm.ip and ":" not in vm.ip and not vm.ip.startswith("169.254.") else None) %}
 <div class="crumbs"><a href="/">Virtual machines</a> / {{ vm.name }}</div>
 <div class="page-head">
   <div class="name-cell">{{ os_icon(links.distro(vm.image_id, vm.template)) }}
@@ -20,11 +21,19 @@
       {% if info.power_state != "poweredOn" %}
         <form method="post" action="/vms/{{ vm.name }}/power/on">{{ csrf_field(request) }}<button>Power on</button></form>
       {% else %}
+        {% set in_progress = pending and pending.running %}
+        {% set no_tools = backend and backend.platform.GUEST_POWER_NEEDS_TOOLS and not info.tools_running %}
         <details class="menu">
           <summary class="btn btn-outline">Power</summary>
           <div class="menu-list">
+            {% if in_progress %}
+            <p class="menu-note">{{ pending.label }}… Only a hard power off can be done until it's over.</p>
+            {% elif no_tools %}
+            <p class="menu-note">Guest tools aren't answering, so the guest can't be asked to reboot or shut down.</p>
+            {% else %}
             <form method="post" action="/vms/{{ vm.name }}/power/reboot">{{ csrf_field(request) }}<button>Reboot</button></form>
-            <form method="post" action="/vms/{{ vm.name }}/power/shutdown">{{ csrf_field(request) }}<button>Shut down</button></form>
+            <form method="post" action="/vms/{{ vm.name }}/power/shutdown" data-confirm="Shut down {{ vm.name }}? Its services stop until it's powered on again.">{{ csrf_field(request) }}<button>Shut down</button></form>
+            {% endif %}
             <hr>
             <form method="post" action="/vms/{{ vm.name }}/power/off" data-confirm="Hard power off {{ vm.name }}?">{{ csrf_field(request) }}
               <button class="danger">Power off (hard)</button></form>
@@ -36,19 +45,32 @@
 </div>
 
 {% if busy %}<div class="alert warn"><span aria-busy="true"></span>A job is running for this VM.</div>{% endif %}
+<div id="vm-status" hx-get="/vms/{{ vm.name }}/status?sig={{ status_sig | urlencode }}"
+     hx-trigger="every {{ '3s' if pending and pending.running else '15s' }}" hx-swap="innerHTML">
+  {% include "_vm_status.html" %}
+</div>
 {% set autostart_wanted = vm.autostart == 1 %}
+{% if vm.seed_pending and vm.status == "ready" %}
+<div class="alert warn row" style="justify-content:space-between">
+  <span>The VM's first-boot seed ISO on {{ backend.name if backend else "its backend" }} still holds its SSH keys,
+    console password hash and compose file: the VM didn't report in after its first boot. Once it's up, replace
+    the seed with a copy without them.</span>
+  {% if not busy %}<form method="post" action="/vms/{{ vm.name }}/seed-cleanup">{{ csrf_field(request) }}
+    <button class="btn-outline btn-sm">Clean up</button></form>{% endif %}
+</div>
+{% endif %}
 {% if autostart and vm.autostart is not none and autostart.enabled != autostart_wanted %}
 <div class="alert warn row" style="justify-content:space-between">
   <span>Autostart should be {{ "on" if autostart_wanted else "off" }}, but host {{ autostart.host }} has it
     {{ "on" if autostart.enabled else "off" }}. This happens when the VM moves to another host, or when
-    someone changes it in vCenter.</span>
+    someone changes it in {{ backend.platform.API if backend else 'its backend' }}.</span>
   {% if not busy %}<form method="post" action="/vms/{{ vm.name }}/autostart">{{ csrf_field(request) }}
     {% if autostart_wanted %}<input type="hidden" name="enabled" value="on">{% endif %}
     <button class="btn-outline btn-sm">Reapply</button></form>{% endif %}
 </div>
 {% elif autostart and autostart.enabled and not autostart.host_enabled %}
 <div class="alert warn">Host {{ autostart.host }} has autostart turned off, so {{ vm.name }} won't start
-  with it. An administrator can turn it on in vCenter (the host &gt; Configure &gt; VM Startup/Shutdown).</div>
+  with it. {{ backend.platform.HOST_AUTOSTART_HELP if backend }}</div>
 {% endif %}
 
 <div class="grid-2">
@@ -56,7 +78,9 @@
     <div class="card-head">Overview</div>
     <div class="card-body">
       <dl class="props">
-        <dt>Power</dt><dd>{% if info %}{{ power(info.power_state) }}{% else %}<span class="error">Not found in vCenter</span>{% endif %}</dd>
+        <dt>Power</dt><dd>{% if info %}{{ power(info.power_state) }}{% else %}<span class="error">Not found in {{ backend.platform.API if backend else 'its backend' }}</span>{% endif %}</dd>
+        <dt>Backend</dt><dd>{% if backend %}{{ backend.name }} <span class="muted">({{ backend.platform.LABEL }})</span>{% else %}<span class="error">No longer in this portal</span>{% endif %}</dd>
+        {% if info and info.host %}<dt>{{ (backend.platform.LOCATION_LABEL if backend) or "Host" }}</dt><dd>{{ info.host }}</dd>{% endif %}
         <dt>IP address</dt><dd>{% if ip %}<span class="mono">{{ ip }}</span> <span class="muted">({{ "static" if vm.ip_mode == "static" else "DHCP" }})</span>{% else %}–{% endif %}</dd>
         <dt>Created</dt><dd>{{ vm.created_at[:16] | replace("T", " ") }}</dd>
         <dt>Template</dt><dd>{{ link(links.template(vm.template, vm.image_id), vm.template) }}</dd>
@@ -81,7 +105,7 @@
         </div>
         <span class="hint">Logs in as <code>{{ (vm.vm_user or settings.vm_user) }}</code> with the default or added SSH keys.</span>
       {% else %}
-        <p class="muted">No IP address yet. It shows up once VMware Tools reports one.</p>
+        <p class="muted">No IP address yet. It shows up once {{ backend.platform.GUEST_TOOLS if backend else "the guest tools" }} reports one.</p>
       {% endif %}
       <span class="label" style="margin-top:1.25rem">Console</span>
       {% if vm.console_login %}
@@ -93,6 +117,7 @@
   </div>
 </div>
 
+{% set rf = resize_form or {} %}
 {% if vm.status == "ready" and not busy %}
 <div class="grid-2 section">
   <div class="card" id="resize">
@@ -103,13 +128,13 @@
         {{ csrf_field(request) }}
         <div class="grid-3">
           <label class="field"><span class="label">vCPUs</span>
-            <input type="number" name="cpus" min="1" max="32" value="{{ vm.cpus }}" required></label>
+            <input type="number" name="cpus" min="1" max="32" value="{{ rf.cpus or vm.cpus }}" required></label>
           <label class="field"><span class="label">Memory (MB)</span>
-            <input type="number" name="memory_mb" min="512" max="262144" step="4" value="{{ vm.memory_mb }}" required></label>
+            <input type="number" name="memory_mb" min="512" max="262144" step="4" value="{{ rf.memory_mb or vm.memory_mb }}" required></label>
           <label class="field"><span class="label">Disk (GB)</span>
-            <input type="number" name="disk_gb" min="{{ vm.disk_gb }}" max="4096" value="{{ vm.disk_gb }}" required></label>
+            <input type="number" name="disk_gb" min="{{ vm.disk_gb }}" max="4096" value="{{ rf.disk_gb or vm.disk_gb }}" required></label>
         </div>
-        <label class="check-field"><input type="checkbox" name="restart">
+        <label class="check-field"><input type="checkbox" name="restart" {% if rf.restart %}checked{% endif %}>
           <span><span class="label">Restart the VM</span>
             <span class="hint">Needed to change vCPUs or memory while the VM is on: it shuts down cleanly
               (forced off after 3 minutes if the guest doesn't respond), changes and starts again.
@@ -148,11 +173,11 @@
             {% if (autostart.enabled if vm.autostart is none else autostart_wanted) %}checked{% endif %}>
           <span><span class="label">Start with its host</span>
             <span class="hint">Powers the VM on when host {{ autostart.host }} starts, for example after a
-              power cut. Set on the host in vCenter.</span></span></label>
+              power cut. {{ backend.platform.AUTOSTART_HINT if backend }}</span></span></label>
         <button class="btn-outline">Save autostart</button>
       </form>
       {% else %}
-      <p class="muted" style="margin:0">Autostart can be changed once vCenter reports the VM.</p>
+      <p class="muted" style="margin:0">Autostart can be changed once {{ backend.platform.API if backend else 'its backend' }} reports the VM.</p>
       {% endif %}
     </div>
   </div>
@@ -172,7 +197,7 @@
       to back it up or move the VM to another portal.</p>
     {% if state_history %}
     <p class="muted">Copies kept before each resize or destroy. Roll back only if the current state is damaged:
-      the VM in vCenter isn't changed, only what the portal knows about it.</p>
+      the VM in {{ backend.platform.API if backend else 'its backend' }} isn't changed, only what the portal knows about it.</p>
     <div class="table-wrap"><table>
       <thead><tr><th>Saved (UTC)</th><th></th></tr></thead>
       <tbody>
@@ -195,7 +220,7 @@
 <div class="section card danger-zone" id="destroy">
   <div class="card-head">Destroy</div>
   <div class="card-body">
-    <p>Destroying <strong>{{ vm.name }}</strong> deletes the VM and its disk from vCenter. This can't be undone.</p>
+    <p>Destroying <strong>{{ vm.name }}</strong> deletes the VM and its disk from {{ backend.platform.API if backend else 'its backend' }}. This can't be undone.</p>
     <form method="post" action="/vms/{{ vm.name }}/destroy" class="row" style="align-items:flex-end">
       {{ csrf_field(request) }}
       <label class="field" style="margin:0;flex:1;max-width:22rem"><span class="label">Type <code>{{ vm.name }}</code> to confirm</span>
@@ -208,7 +233,7 @@
 <div class="section card danger-zone" id="forget">
   <div class="card-head">Forget</div>
   <div class="card-body">
-    <p>Forgetting <strong>{{ vm.name }}</strong> removes it from this portal and leaves it running in vCenter,
+    <p>Forgetting <strong>{{ vm.name }}</strong> removes it from this portal and leaves it running in {{ backend.platform.API if backend else 'its backend' }},
       unchanged. Do this after moving it to another portal, so two portals never manage the same VM.
       {% if can_resize %}<a href="/settings/backup?vm={{ vm.name }}">Export it</a> first if no other portal has it yet:
       without its OpenTofu state, no portal can resize or destroy it.{% endif %}</p>

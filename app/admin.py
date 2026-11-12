@@ -7,11 +7,10 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
 
-from . import config, db, packer, users
+from . import backends, config, db, feedback, packer, users
 from .auth import client_ip, current_user, require_admin, require_user, start_session
 from .config import SECRET_FIELDS, SECTIONS, Settings, env_overrides, get_settings
-from .platforms import current as platform
-from .platforms import vsphere   # the Settings → vCenter page is vSphere's own
+from .platforms import PLATFORMS
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,7 +31,7 @@ def audit(request: Request, user: dict | None, action: str, detail: str = "") ->
 async def setup_form(request: Request):
     if db.user_count():
         u = current_user(request)
-        return RedirectResponse("/setup/vcenter" if u and u["role"] == "admin" else "/login", status_code=303)
+        return RedirectResponse("/setup/backend" if u and u["role"] == "admin" else "/login", status_code=303)
     return render(request, "setup.html", form={})
 
 
@@ -68,56 +67,83 @@ async def setup(request: Request, token: str = Form(""), username: str = Form(""
     user = users.get(uid)
     start_session(request, user)
     audit(request, user, "setup.admin_created", username)
-    return RedirectResponse("/setup/vcenter", status_code=303)
+    return RedirectResponse("/setup/backend", status_code=303)
+
+
+# The second and third steps set up the first backend: its connection and placement, then
+# its IP pool (with the default SSH keys). More backends are added under Settings.
+
+def _setup_backend() -> backends.Backend | None:
+    return next(iter(backends.all_backends()), None)
 
 
 @router.get("/setup/vcenter", dependencies=[Depends(require_admin)])
-async def setup_vcenter_form(request: Request):
-    return render_setup(request, "vcenter")
+async def setup_vcenter_redirect():
+    return RedirectResponse("/setup/backend", status_code=303)
 
 
-@router.post("/setup/vcenter")
-async def setup_vcenter(request: Request, user: dict = Depends(require_admin)):
+@router.get("/setup/backend", dependencies=[Depends(require_admin)])
+async def setup_backend_form(request: Request):
+    return render_setup(request, "backend", _setup_backend())
+
+
+@router.post("/setup/backend")
+async def setup_backend(request: Request, user: dict = Depends(require_admin)):
+    from .routes_backends import save_backend
     form = await request.form()
+    b = _setup_backend()
     try:
-        apply_changes(request, user, _form_changes("vcenter", form, env_overrides()))
-        missing = [FIELDS[k]["label"] for k in config.VCENTER_REQUIRED if not getattr(get_settings(), k)]
+        if b is None:   # first: which kind of backend
+            kind = str(form.get("type", ""))
+            if kind not in PLATFORMS:
+                raise ValueError("Choose the type of backend")
+            name = str(form.get("name", "")).strip() or backends.DEFAULT_NAMES.get(kind, kind)
+            backends.create(name, kind, {}, by=user["username"])
+            audit(request, user, "backend.created", f"{name} ({kind})")
+            return RedirectResponse("/setup/backend", status_code=303)
+        await save_backend(request, user, b, form, keys=[*b.platform.CONNECTION, *b.platform.PLACEMENT],
+                           general=False)
+        b = backends.get(b.id)
+        missing = [FIELDS[k]["label"] for k in b.platform.REQUIRED if not getattr(b.cfg, k)]
         if missing:
             raise ValueError("Still missing: " + ", ".join(missing))
     except ValueError as e:
-        return render_setup(request, "vcenter", status_code=400, error=str(e))
+        return render_setup(request, "backend", b, status_code=400, error=str(e))
     return RedirectResponse("/setup/network", status_code=303)
 
 
 @router.get("/setup/network", dependencies=[Depends(require_admin)])
 async def setup_network_form(request: Request):
-    return render_setup(request, "network")
+    return render_setup(request, "network", _setup_backend())
 
 
 @router.post("/setup/network")
 async def setup_network(request: Request, user: dict = Depends(require_admin)):
+    from .routes_backends import save_backend
     form = await request.form()
     locked = env_overrides()
+    b = _setup_backend()
     try:
-        changes = _form_changes("network", form, locked)
+        if b is not None:
+            await save_backend(request, user, b, form, keys=config.POOL_FIELDS, general=False)
         new_keys = [k.strip() for k in str(form.get("ssh_keys", "")).splitlines() if k.strip()]
         if new_keys and "default_ssh_keys" not in locked:
-            changes["default_ssh_keys"] = get_settings().default_ssh_keys + new_keys
-        apply_changes(request, user, changes)
+            apply_changes(request, user, {"default_ssh_keys": get_settings().default_ssh_keys + new_keys})
     except ValueError as e:
-        return render_setup(request, "network", status_code=400, error=str(e), ssh_keys=form.get("ssh_keys", ""))
+        return render_setup(request, "network", b, status_code=400, error=str(e), ssh_keys=form.get("ssh_keys", ""))
     audit(request, user, "setup.completed")
     return RedirectResponse("/", status_code=303)
 
 
-def render_setup(request: Request, step: str, status_code: int = 200, **ctx) -> HTMLResponse:
-    s, locked = get_settings(), env_overrides()
-    if step == "vcenter":
-        fields = [f for f in field_views("vcenter", s, locked) if f["key"] in CONNECTION]
+def render_setup(request: Request, step: str, b: backends.Backend | None, status_code: int = 200,
+                 **ctx) -> HTMLResponse:
+    from .routes_backends import backend_context
+    data = backend_context(b) if b else {"backend": None}
+    if step == "backend":
+        data["types"] = [(p.NAME, p.LABEL) for p in PLATFORMS.values()]
     else:
-        fields = field_views("network", s, locked)
-    return render(request, f"setup_{step}.html", status_code=status_code, fields=fields, locked=locked,
-                  has_creds=bool(s.vsphere_server and s.vsphere_password), **ctx)
+        data["fields"] = data.get("pool_fields", [])
+    return render(request, f"setup_{step}.html", status_code=status_code, locked=env_overrides(), **data, **ctx)
 
 
 # --- own account ----------------------------------------------------------------
@@ -164,6 +190,24 @@ FIELDS: dict[str, dict] = {
     "vsphere_datastore": {"label": "Datastore"},
     "vsphere_network": {"label": "Network (port group)"},
     "vsphere_folder": {"label": "VM folder", "hint": "Optional"},
+    "proxmox_server": {"label": "Server", "hint": "Hostname or IP of a Proxmox node, optionally with :port (8006)"},
+    "proxmox_token_id": {"label": "API token ID", "mono": True,
+                         "hint": "user@realm!tokenname. Use a dedicated user and token with only the "
+                                 "permissions the portal needs"},
+    "proxmox_token_secret": {"label": "API token secret", "type": "password"},
+    "proxmox_fingerprint": {"label": "Certificate fingerprint (SHA-256)", "mono": True,
+                            "hint": "Only for Proxmox's own (self-signed) certificate: copy it from the node's "
+                                    "System > Certificates. Empty: the certificate must be trusted like any website's"},
+    "proxmox_node": {"label": "Node"},
+    "proxmox_storage": {"label": "Storage for VM disks"},
+    "proxmox_iso_storage": {"label": "Storage for ISO images"},
+    "proxmox_bridge": {"label": "Network bridge"},
+    "proxmox_pool": {"label": "Resource pool", "hint": "Optional"},
+    "proxmox_vlan": {"label": "VLAN tag", "hint": "Optional, 1 to 4094: tags the network cards of new VMs and of "
+                                                  "template builds on the bridge. Empty: untagged"},
+    "proxmox_nodes": {"label": "More nodes for VMs", "type": "list",
+                      "hint": "Optional, comma separated: other nodes of the cluster users may put a VM on. "
+                              "The storages and the bridge must exist there under the same names"},
     "ip_pool_start": {"label": "Pool start", "mono": True},
     "ip_pool_end": {"label": "Pool end", "mono": True},
     "ip_prefix": {"label": "Prefix length", "type": "number", "hint": "e.g. 24 for 255.255.255.0"},
@@ -182,10 +226,10 @@ FIELDS: dict[str, dict] = {
     "template_max_age_days": {"label": "Flag templates older than (days)", "type": "number"},
     "packer_http_ip": {"label": "Build HTTP address", "mono": True,
                        "hint": "IP that build VMs fetch installer files from (Debian preseed). Empty: the "
-                               "address the portal uses to reach vCenter."},
+                               "address the portal uses to reach the backend's API."},
     "allow_image_editing": {"label": "Allow creating and editing image definitions in the browser",
                             "type": "bool", "confirm": True,
-                            "hint": "Definitions are code: Packer runs them inside the portal with the vCenter "
+                            "hint": "Definitions are code: Packer runs them inside the portal with the backends' "
                                     "credentials. Only turn this on if you trust every admin with that."},
     "backup_enabled": {"label": "Make scheduled backups", "type": "bool",
                        "hint": "Full backups of the portal, written to the backup folder"},
@@ -199,7 +243,7 @@ FIELDS: dict[str, dict] = {
                            "hint": "Turn on when the portal is served over HTTPS, normally behind a reverse proxy. "
                                    "Browsers then never send the session over plain HTTP."},
 }
-TABS = [("vcenter", "vCenter"), ("network", "Network"), ("vms", "VM defaults"), ("ssh-keys", "SSH keys"),
+TABS = [("backends", "Backends"), ("vms", "VM defaults"), ("ssh-keys", "SSH keys"),
         ("templates", "Images"), ("security", "Security"), ("users", "Users"), ("backup", "Backup"),
         ("audit", "Audit log"), ("system", "System")]
 # Turning these on needs the admin's password, so a hijacked session can't quietly do it.
@@ -230,16 +274,17 @@ def key_id(key: str) -> str:
 def render_settings(request: Request, section: str, status_code: int = 200, submitted: dict | None = None,
                     **ctx) -> HTMLResponse:
     s, locked = get_settings(), env_overrides()
+    env_backends = [x for x in backends.all_backends() if x.from_env and x.locked]
     data = {"section": section, "tabs": TABS, "locked": locked,
-            "importable": sorted(locked)}
+            "importable": sorted(locked) + [f"{x.name}: {k}" for x in env_backends for k in sorted(x.locked)]}
+    if section == "backends" and "backend" not in ctx:
+        from .routes_backends import list_context
+        data.update(list_context())
     if section in SECTIONS and section != "ssh-keys":
         data["fields"] = field_views(section, s, locked, submitted)
         data["confirm_fields"] = [FIELDS[f["key"]]["label"] for f in data["fields"]
                                   if f["key"] in CONFIRM_TO_ENABLE and not f["locked"] and not getattr(s, f["key"])]
         data["is_https"] = request.url.scheme == "https"
-    if section == "vcenter":
-        data["fields"] = [f for f in data["fields"] if f["key"] in CONNECTION]
-        data["has_creds"] = bool(s.vsphere_server and s.vsphere_password)
     if section == "ssh-keys":
         data["keys"] = [{"id": key_id(k), "type": k.split()[0], "comment": " ".join(k.split()[2:]),
                          "short": k.split()[1][-16:]} for k in s.default_ssh_keys]
@@ -275,8 +320,6 @@ def apply_changes(request: Request, user: dict, changes: dict) -> None:
         return
     db.save_settings(changed, SECRET_FIELDS, by=user["username"])
     config.get_settings.cache_clear()
-    if any(k.startswith("vsphere_") for k in changed):
-        platform().close()  # reconnect with the new settings
     audit(request, user, "settings.changed", ", ".join(sorted(changed)))  # names only, never values
 
 
@@ -310,7 +353,7 @@ def system_info(request: Request) -> dict:
             ("First admin", "ADMIN_USERNAME / ADMIN_PASSWORD", "only used while there are no users",
              "Afterwards, manage users under Users."),
         ],
-        "overrides": sorted(env_overrides()),
+        "overrides": sorted(env_overrides() | (config.env_fields() & config.BACKEND_FIELDS)),
         "tools": {t: bool(shutil.which(t)) for t in ("tofu", "packer", "xorriso")},
         "https": request.url.scheme == "https",
     }
@@ -343,7 +386,14 @@ def confirm_password(request: Request, user: dict, password, what: str, message:
 
 @router.get("/settings", dependencies=[Depends(require_admin)])
 async def settings_index():
-    return RedirectResponse("/settings/vcenter", status_code=303)
+    return RedirectResponse("/settings/backends", status_code=303)
+
+
+@router.get("/settings/vcenter", dependencies=[Depends(require_admin)])
+async def settings_vcenter():
+    """The page from before backends existed: now the first vCenter backend's."""
+    b = next((x for x in backends.all_backends() if x.type == "vsphere"), None)
+    return RedirectResponse(f"/settings/backends/{b.id}" if b else "/settings/backends", status_code=303)
 
 
 @router.get("/settings/{section}", dependencies=[Depends(require_admin)])
@@ -372,108 +422,7 @@ def _form_changes(section: str, form, locked: set[str]) -> dict:
             changes[key] = raw
         else:
             changes[key] = raw.strip()
-    # Don't let a changed server receive the stored password: require it to be re-entered.
-    # A password from the environment can't be re-entered here, so it stays with the server
-    # it was configured for: once a server is set, that server must change in the
-    # environment too. (Pointing the UI at another host would send it the env password.)
-    server = changes.get("vsphere_server", current.vsphere_server)
-    if (section == "vcenter" and server != current.vsphere_server and current.vsphere_password
-            and "vsphere_password" not in changes):
-        if "vsphere_password" not in locked:
-            raise ValueError("Re-enter the password when you change the server")
-        if current.vsphere_server:
-            raise ValueError("The password is set in the environment (VSPHERE_PASSWORD), so the server can't be "
-                             "changed here: set VSPHERE_SERVER in the environment as well")
     return changes
-
-
-PLACEMENT = ["vsphere_datacenter", "vsphere_cluster", "vsphere_datastore", "vsphere_network", "vsphere_folder"]
-CONNECTION = ["vsphere_server", "vsphere_user", "vsphere_password", "vsphere_insecure"]
-# Changing a field resets the fields that depend on it.
-DEPENDENTS = {"vsphere_datacenter": PLACEMENT[1:], "vsphere_cluster": ["vsphere_datastore", "vsphere_network"]}
-
-
-def _credentials(form) -> dict:
-    """Connection values from the form, falling back to the stored ones (password: only for the same server)."""
-    s = get_settings()
-    changes = _form_changes("vcenter", form, env_overrides())  # raises if the server changed without a password
-    creds = {"server": changes.get("vsphere_server", s.vsphere_server),
-             "user": changes.get("vsphere_user", s.vsphere_user),
-             "password": changes.get("vsphere_password", s.vsphere_password),
-             "insecure": changes.get("vsphere_insecure", s.vsphere_insecure)}
-    Settings.model_validate({"vsphere_server": creds["server"]})
-    if not all((creds["server"], creds["user"], creds["password"])):
-        raise ValueError("Enter the server, user and password first")
-    return creds
-
-
-def _select(key: str, label: str, value: str, options: list[tuple[str, str]], locked: set[str], *,
-            optional: bool = False, cascade: bool = False, empty: str = "Choose…") -> dict:
-    names = [v for v, _ in options]
-    missing = bool(value) and value not in names
-    if missing:
-        options = [(value, f"{value} (not found in vCenter)")] + options
-    return {"key": key, "label": label, "value": value, "options": options, "locked": key in locked,
-            "missing": missing, "optional": optional, "cascade": cascade, "empty": empty}
-
-
-def placement_view(inv: dict, chosen: dict, locked: set[str]) -> list[dict]:
-    def auto(value: str, names: list[str]) -> str:
-        return names[0] if not value and len(names) == 1 else value
-
-    dcs = inv["datacenters"]
-    dc_val = auto(chosen["vsphere_datacenter"], [d["name"] for d in dcs])
-    dc = next((d for d in dcs if d["name"] == dc_val), None)
-    clusters = dc["clusters"] if dc else []
-    cl_val = auto(chosen["vsphere_cluster"], [c["name"] for c in clusters])
-    cl = next((c for c in clusters if c["name"] == cl_val), None)
-    stores = cl["datastores"] if cl else []
-    nets = cl["networks"] if cl else []
-    ds_val = auto(chosen["vsphere_datastore"], [d["name"] for d in stores])
-    net_val = auto(chosen["vsphere_network"], nets)
-    first = "Choose a datacenter first" if not dc else "Choose a cluster first"
-    return [
-        _select("vsphere_datacenter", "Datacenter", dc_val, [(d["name"], d["name"]) for d in dcs], locked,
-                cascade=True),
-        _select("vsphere_cluster", "Cluster", cl_val, [(c["name"], c["name"]) for c in clusters], locked,
-                cascade=True, empty="Choose…" if dc else first),
-        _select("vsphere_datastore", "Datastore", ds_val,
-                [(d["name"], f"{d['name']} · {d['free_gb']:,} GB free of {d['capacity_gb']:,} GB ({d['type']})")
-                 for d in stores], locked, empty="Choose…" if cl else first),
-        _select("vsphere_network", "Network (port group)", net_val, [(n, n) for n in nets], locked,
-                empty="Choose…" if cl else first),
-        _select("vsphere_folder", "VM folder", chosen["vsphere_folder"],
-                [(f, f) for f in (dc["folders"] if dc else [])], locked, optional=True,
-                empty="(datacenter root)"),
-    ]
-
-
-@router.post("/settings/vcenter/placement")
-async def vcenter_placement(request: Request, user: dict = Depends(require_admin)):
-    """htmx: connect with the form's credentials and render the placement dropdowns."""
-    form = await request.form()
-    s, locked = get_settings(), env_overrides()
-    chosen = {k: (form.get(k) if k not in locked and isinstance(form.get(k), str) else getattr(s, k))
-              for k in PLACEMENT}
-    trigger = request.headers.get("HX-Trigger-Name", "")
-    for k in DEPENDENTS.get(trigger, []):
-        if k not in locked:
-            chosen[k] = ""
-    ctx = {"chosen": chosen, "locked": locked}
-    try:
-        creds = _credentials(form)
-        inv = await asyncio.wait_for(asyncio.to_thread(
-            vsphere.inventory, **creds, fresh=form.get("fresh") == "1"), timeout=45)
-    except Exception as e:  # noqa: BLE001 - shown to the admin; falls back to text fields
-        if not isinstance(e, ValueError):
-            audit(request, user, "settings.vcenter_connect_failed", str(form.get("vsphere_server", ""))[:100])
-        text = getattr(e, "msg", None) or str(e) or type(e).__name__
-        fields = [f for f in field_views("vcenter", s, locked) if f["key"] in PLACEMENT]
-        for f in fields:
-            f["value"] = chosen[f["key"]]
-        return render(request, "_placement.html", error_text=text, fields=fields, **ctx)
-    return render(request, "_placement.html", about=inv["about"], selects=placement_view(inv, chosen, locked),
-                  **ctx)
 
 
 @router.post("/settings/import-env")
@@ -482,8 +431,10 @@ async def import_env(request: Request, user: dict = Depends(require_admin)):
     values = {k: getattr(s, k) for k in env_overrides()}
     if values:
         db.save_settings(values, SECRET_FIELDS, by=user["username"])
-        audit(request, user, "settings.imported_env", ", ".join(sorted(values)))
-    return render_settings(request, "vcenter", notice=f"Saved {len(values)} value(s) from the environment. "
+    done = sorted(values) + backends.import_env(user["username"])
+    if done:
+        audit(request, user, "settings.imported_env", ", ".join(done))
+    return render_settings(request, "backends", notice=f"Saved {len(done)} value(s) from the environment. "
                            "You can now remove them from the environment and restart the portal.")
 
 
@@ -508,7 +459,9 @@ async def ssh_key_add(request: Request, user: dict = Depends(require_admin), key
         apply_changes(request, user, {"default_ssh_keys": get_settings().default_ssh_keys + new})
     except ValueError as e:
         return render_settings(request, "ssh-keys", status_code=400, error=str(e))
-    return RedirectResponse("/settings/ssh-keys", status_code=303)
+    return feedback.redirect(request, "/settings/ssh-keys",
+                             notice=f"Added {len(new)} key{'' if len(new) == 1 else 's'}. New VMs get "
+                                    f"{'it' if len(new) == 1 else 'them'}; existing VMs don't change.")
 
 
 @router.post("/settings/ssh-keys/{kid}/delete")
@@ -516,8 +469,12 @@ async def ssh_key_delete(request: Request, kid: str, user: dict = Depends(requir
     if "default_ssh_keys" in env_overrides():
         raise HTTPException(400, "SSH keys are set by the environment")
     keys = get_settings().default_ssh_keys
-    apply_changes(request, user, {"default_ssh_keys": [k for k in keys if key_id(k) != kid]})
-    return RedirectResponse("/settings/ssh-keys", status_code=303)
+    left = [k for k in keys if key_id(k) != kid]
+    if len(left) == len(keys):
+        return feedback.redirect(request, "/settings/ssh-keys", error="That key was already removed.")
+    apply_changes(request, user, {"default_ssh_keys": left})
+    return feedback.redirect(request, "/settings/ssh-keys",
+                             notice="Key removed. New VMs won't get it; VMs that have it keep it.")
 
 
 # --- users ------------------------------------------------------------------------
@@ -546,7 +503,7 @@ async def user_create(request: Request, user: dict = Depends(require_admin), use
     except ValueError as e:
         return render_settings(request, "users", status_code=400, error=str(e), new_username=username)
     audit(request, user, "user.created", f"{username.strip().lower()} ({role})")
-    return RedirectResponse("/settings/users", status_code=303)
+    return feedback.redirect(request, "/settings/users", notice=f"Added {username.strip().lower()} ({role}).")
 
 
 @router.post("/settings/users/{uid}/role")
@@ -564,7 +521,9 @@ async def user_role(request: Request, uid: int, user: dict = Depends(require_adm
     # Bumping session_version makes the new role take effect on a fresh login.
     db.execute("UPDATE users SET role=?, session_version=session_version+1 WHERE id=?", (role, uid))
     audit(request, user, "user.role", f"{u['username']} -> {role}")
-    return RedirectResponse("/settings/users", status_code=303)
+    return feedback.redirect(request, "/settings/users",
+                             notice=f"{u['username']} is now {'an' if role == 'admin' else 'a'} {role}. "
+                                    "It applies from their next login.")
 
 
 @router.post("/settings/users/{uid}/disable")
@@ -573,7 +532,9 @@ async def user_disable(request: Request, uid: int, user: dict = Depends(require_
     disabled = 0 if u["disabled"] else 1
     db.execute("UPDATE users SET disabled=?, session_version=session_version+1 WHERE id=?", (disabled, uid))
     audit(request, user, "user.disabled" if disabled else "user.enabled", u["username"])
-    return RedirectResponse("/settings/users", status_code=303)
+    return feedback.redirect(request, "/settings/users",
+                             notice=f"{u['username']} is disabled and logged out." if disabled
+                             else f"{u['username']} can log in again.")
 
 
 @router.post("/settings/users/{uid}/password")
@@ -598,7 +559,7 @@ async def user_delete(request: Request, uid: int, user: dict = Depends(require_a
                                error=f"{u['username']} still owns VMs. Destroy them or disable the user instead.")
     db.execute("DELETE FROM users WHERE id=?", (uid,))
     audit(request, user, "user.deleted", u["username"])
-    return RedirectResponse("/settings/users", status_code=303)
+    return feedback.redirect(request, "/settings/users", notice=f"Deleted {u['username']}.")
 
 
 @router.post("/settings/{section}")

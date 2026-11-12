@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import ValidationError
 
-from . import db, images, jobs
+from . import db, feedback, images, jobs
 from .auth import client_ip, require_admin
 from .config import CONTROL_RE, PREFIX_RE, get_settings
 
@@ -176,17 +176,36 @@ def check_content(img: images.ImageDef, rel: str, content: str) -> None:
             raise ValueError(f"image.yaml is invalid: {e}") from None
 
 
+# Stand-ins for a backend of each type: validating evaluates every source, but never
+# connects anywhere (192.0.2.1 is a documentation address).
+VALIDATE_BACKENDS = {
+    "vsphere": {"vsphere_server": "192.0.2.1", "vsphere_user": "not-configured",
+                "vsphere_password": "not-used-by-validate", "vsphere_datacenter": "not-configured",
+                "vsphere_cluster": "not-configured", "vsphere_datastore": "not-configured",
+                "vsphere_network": "not-configured"},
+    "proxmox": {"proxmox_server": "192.0.2.1", "proxmox_token_id": "validate@pve!validate",
+                "proxmox_token_secret": "not-used-by-validate", "proxmox_node": "not-configured",
+                "proxmox_storage": "not-configured", "proxmox_iso_storage": "not-configured",
+                "proxmox_bridge": "not-configured"},
+}
+
+
 def validation_env(img: images.ImageDef) -> dict[str, str]:
-    """The variables a build would get, minus the secret: validating never connects to vCenter."""
+    """The variables a build would get, for every backend type the definition supports,
+    with stand-ins for the connection: validating never contacts a backend."""
+    from types import SimpleNamespace
+
     from . import packer
+    from .config import BackendFields
+    from .platforms import PLATFORMS
     cfg = images.config(img)
-    if not cfg.iso_url:
-        cfg = cfg.model_copy(update={"iso_url": "[datastore] iso/not-chosen-yet.iso"})
-    env = packer.packer_env(img, cfg, f"{img.manifest.template_prefix}-validate")
-    env["PKR_VAR_vsphere_password"] = "not-used-by-validate"
-    # Builders require these; placeholders let a definition be checked before vCenter is set up.
-    for key in ("server", "user", "datacenter", "cluster", "datastore", "network"):
-        env[f"PKR_VAR_vsphere_{key}"] = env[f"PKR_VAR_vsphere_{key}"] or "not-configured"
+    env: dict[str, str] = {}
+    for kind in img.manifest.platforms:
+        b = SimpleNamespace(id=0, name="validate", type=kind, platform=PLATFORMS[kind], key="0:validate",
+                            cfg=BackendFields(**VALIDATE_BACKENDS[kind]), configured=True)
+        iso = cfg.iso_url or ("[datastore] iso/not-chosen-yet.iso" if kind == "vsphere" else "local:iso/not-chosen-yet.iso")
+        env.update(packer.packer_env(img, cfg.model_copy(update={"isos": {"0": iso}}),
+                                     f"{img.manifest.template_prefix}-validate", b))
     return env
 
 
@@ -195,7 +214,7 @@ def packer_check(img: images.ImageDef) -> tuple[bool, str]:
 
     Validating evaluates variables, locals and templatefile() (so it catches a
     missing variable or a broken installer template) but runs no builder or
-    provisioner and doesn't contact vCenter.
+    provisioner and doesn't contact any backend.
     """
     if not shutil.which("packer"):
         return True, "packer is not installed; not checked"
@@ -385,7 +404,8 @@ async def delete_definition(request: Request, image_id: str, user: dict = Depend
         raise HTTPException(400, "Type the image id to confirm")
     trash = images.custom_dir() / ".deleted" / f"{img.id}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
     trash.parent.mkdir(parents=True, exist_ok=True)
-    img.path.rename(trash)  # kept for recovery; templates already built stay in vCenter
+    img.path.rename(trash)  # kept for recovery; templates already built stay on the backends
     db.execute("DELETE FROM image_settings WHERE image_id=?", (img.id,))
     _audit(request, user, "image.deleted", img.id)
-    return RedirectResponse("/images?tab=definitions", status_code=303)
+    return feedback.redirect(request, "/images?tab=definitions",
+                             notice=f"Deleted image definition {img.id}. Its templates stay on the backends.")

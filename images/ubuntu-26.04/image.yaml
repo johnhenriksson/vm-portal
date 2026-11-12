@@ -11,6 +11,7 @@ os:
 guest: cloud-init          # how clones are configured (hostname, network, keys)
 features: [docker]         # enables the compose.yaml option when creating VMs
 template_prefix: ubuntu-2604-docker
+platforms: [vsphere, proxmox]   # backend types it has a Packer source for
 login_user_parameter: ssh_username
 build:
   cpus: 2

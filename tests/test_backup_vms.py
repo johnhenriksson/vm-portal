@@ -13,7 +13,7 @@ from backup_helpers import PROVIDER, admin, good_facts, make_vm, state, tfvars  
 def vcenter(monkeypatch):
     facts = {"vm-42": good_facts()}
     from app.platforms import vsphere
-    monkeypatch.setattr(vsphere, "vm_facts", lambda moid: facts.get(moid))
+    monkeypatch.setattr(vsphere, "vm_facts", lambda b, moid: facts.get(moid))
     return facts
 
 
@@ -77,7 +77,7 @@ def test_import_into_another_portal(vcenter, data_dir):
     import shutil
     shutil.rmtree(provision.vm_dir("web-01"))
     plan = restore.plan_vm_imports(b, admin())
-    restore.check_vcenter(plan)
+    restore.check_backends(plan)
     assert [p.name for p in plan] == ["web-01"] and plan[0].ok, plan[0].problems
     assert restore.import_vms(plan, ["web-01"], admin(), "test") == ["web-01"]
     vm = db.active_vm("web-01")
@@ -106,7 +106,7 @@ def test_import_refuses_vms_that_are_not_the_portals(vcenter, change, match):
     shutil.rmtree(provision.vm_dir("web-01"))
     vcenter["vm-42"] = {**good_facts(), **change}
     plan = restore.plan_vm_imports(b, admin())
-    restore.check_vcenter(plan)
+    restore.check_backends(plan)
     assert any(match in p for p in plan[0].problems), plan[0].problems
     with pytest.raises(ValueError, match="can't be imported"):
         restore.import_vms(plan, ["web-01"], admin(), "test")
@@ -124,15 +124,15 @@ def test_import_checks_folder_and_missing_vm(vcenter, monkeypatch):
     shutil.rmtree(provision.vm_dir("web-01"))
     vcenter["vm-42"] = {**good_facts(), "folder": "Prod"}
     plan = restore.plan_vm_imports(b, admin())
-    restore.check_vcenter(plan)
-    assert "outside the portal's 'Portal'" in plan[0].problems[0]
+    restore.check_backends(plan)
+    assert "outside the backend's 'Portal'" in plan[0].problems[0]
     vcenter["vm-42"] = {**good_facts(), "folder": "Portal/team-a"}
     plan = restore.plan_vm_imports(b, admin())
-    restore.check_vcenter(plan)
+    restore.check_backends(plan)
     assert plan[0].ok
     del vcenter["vm-42"]
     plan = restore.plan_vm_imports(b, admin())
-    restore.check_vcenter(plan)
+    restore.check_backends(plan)
     assert "no VM with id vm-42" in plan[0].problems[0]
 
 
@@ -152,7 +152,7 @@ def test_replacing_the_state_of_an_existing_vm(vcenter):
     b = export()
     (d / "terraform.tfstate").write_text("damaged{")
     plan = restore.plan_vm_imports(b, admin())
-    restore.check_vcenter(plan)
+    restore.check_backends(plan)
     assert plan[0].ok and plan[0].replace
     restore.import_vms(plan, ["web-01"], admin(), "test")
     assert provision.vm_moid("web-01") == "vm-42"

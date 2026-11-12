@@ -25,8 +25,22 @@
 {% block content %}
 <div class="page-head"><div><h1>Create virtual machine</h1></div></div>
 
+{% if backend_choices | length > 1 %}
+<form method="get" action="/vms/new" class="row backend-picker" data-autosubmit>
+  <label class="field field-narrow"><span class="label">Backend</span>
+    <select name="backend" aria-label="Backend the VM goes on">
+      {% for b in backend_choices %}<option value="{{ b.id }}" {% if backend and b.id == backend.id %}selected{% endif %}>{{ b.name }} ({{ b.platform.LABEL }})</option>{% endfor %}
+    </select></label>
+  <button type="submit" class="btn-outline" data-autosubmit-button>Switch</button>
+  <span class="hint">Images, sizes and IPs below are for the backend you choose.</span>
+</form>
+{% elif not backend %}
+<div class="alert warn">There's no backend you can create VMs on.{% if current_user.role == "admin" %} <a href="/settings/backends">Set one up</a>.{% else %} Ask an admin.{% endif %}</div>
+{% endif %}
+
 <form method="post" action="/vms" id="vm-form" class="create-layout">
 {{ csrf_field(request) }}
+{% if backend %}<input type="hidden" name="backend_id" value="{{ backend.id }}">{% endif %}
 <div>
   <section class="create-section" id="sec-image">
     <h2>Choose an image</h2>
@@ -35,16 +49,17 @@
       {% set chosen = form.template in (c.templates | map(attribute="name") | list) %}
       <label class="choice" data-image-choice data-login-user="{{ c.login_user }}"
              data-docker="{{ 'yes' if c.docker else 'no' }}" data-console-password="{{ 'yes' if c.console_password else 'no' }}">
-        <input type="radio" name="template" value="{{ form.template if chosen else c.templates[0].name }}" required
+        {% set picked = form.template if chosen else c.templates[0].name %}
+        <input type="radio" name="template" value="{{ picked }}" data-min-disk="{{ c.min_disk[picked] }}" required
                {% if chosen or (loop.first and not form.template) %}checked{% endif %}>
         {{ os_icon(c.distro) }}
         <span><span class="choice-title">{{ c.name }}</span>
           <span class="choice-meta" style="display:block">Login user <code>{{ c.login_user }}</code>
             {%- if c.templates[0].age_days is not none %} · newest built {{ c.templates[0].age_days }} day{{ "" if c.templates[0].age_days == 1 else "s" }} ago{% endif %}</span></span>
         <span class="push">
-          <select class="version-select" aria-label="Template version for {{ c.name }}" {% if c.templates | length == 1 %}disabled{% endif %}>
+          <select class="compact" aria-label="Template version for {{ c.name }}" {% if c.templates | length == 1 %}disabled{% endif %}>
             {% for t in c.templates %}
-            <option value="{{ t.name }}" {% if t.name == form.template %}selected{% endif %}>{{ t.name }}{% if loop.first %} (newest){% endif %}</option>
+            <option value="{{ t.name }}" data-min-disk="{{ c.min_disk[t.name] }}" {% if t.name == form.template %}selected{% endif %}>{{ t.name }}{% if loop.first %} (newest){% endif %}</option>
             {% endfor %}
           </select>
         </span>
@@ -55,12 +70,24 @@
     </div>
   </section>
 
+  {% if locations %}
+  <section class="create-section" id="sec-location">
+    <h2>Choose a {{ backend.platform.LOCATION_LABEL | lower }}</h2>
+    <label class="field field-narrow"><span class="label">{{ backend.platform.LOCATION_LABEL }}</span>
+      <select name="location">
+        {% for l in locations %}<option value="{{ l }}" {% if l == form.location %}selected{% endif %}>{{ l }}{% if loop.first %} (default){% endif %}</option>{% endfor %}
+      </select>
+      <span class="hint">Which {{ backend.platform.LOCATION_LABEL | lower }} of {{ backend.name }} the VM is created on.</span></label>
+  </section>
+  {% endif %}
+
   <section class="create-section" id="sec-size">
     <h2>Choose size</h2>
     <p class="desc">Pick a size, or set exact values below.</p>
     {{ slider("cpus", "vCPUs", [1, 2, 4, 8, 16], form.cpus, vcpu, "vCPUs") }}
     {{ slider("memory_mb", "Memory", [1024, 2048, 4096, 8192, 16384, 32768], form.memory_mb, gb, "GB RAM") }}
-    {{ slider("disk_gb", "Disk", [20, 40, 80, 160, 320], form.disk_gb, disk, "GB disk") }}
+    {{ slider("disk_gb", "Disk", [25, 40, 80, 160, 320], form.disk_gb, disk, "GB disk") }}
+    <span class="hint" id="disk-min-hint" hidden></span>
     <details class="custom-size">
       <summary>Custom values</summary>
       <div class="grid-3">
@@ -69,7 +96,7 @@
         <label class="field"><span class="label">Memory (MB)</span>
           <input type="number" name="memory_mb" id="memory_mb" min="512" step="512" value="{{ form.memory_mb }}" required></label>
         <label class="field"><span class="label">Disk (GB)</span>
-          <input type="number" name="disk_gb" id="disk_gb" min="10" value="{{ form.disk_gb }}" required></label>
+          <input type="number" name="disk_gb" id="disk_gb" min="10" data-floor="10" value="{{ form.disk_gb }}" required></label>
       </div>
     </details>
   </section>
@@ -81,18 +108,19 @@
       <label><input type="radio" name="ip_mode" value="static" {% if form.ip_mode == 'static' %}checked{% endif %}>Static IP<small>Pick from the pool</small></label>
     </div>
     <div id="dhcp-pane" {% if form.ip_mode == 'static' %}hidden{% endif %}>
-      <p class="muted">The VM gets its address over DHCP. It shows up on the VM page once VMware Tools reports it.</p>
+      <p class="muted">The VM gets its address over DHCP. It shows up on the VM page once the guest tools report it.</p>
     </div>
     <div id="static-pane" {% if form.ip_mode != 'static' %}hidden{% endif %}>
       <span class="label">IP address</span>
       <div class="row">
-        <input id="ip" name="ip" value="{{ form.ip or '' }}" placeholder="{{ settings.ip_pool_start or '192.0.2.10' }}" class="mono">
-        <button type="button" class="btn-outline" hx-get="/ip/suggest?fresh=true" hx-target="#ip-suggestions"
+        {% set pool = backend.cfg if backend else none %}
+        <input id="ip" name="ip" value="{{ form.ip or '' }}" placeholder="{{ (pool.ip_pool_start if pool else '') or '192.0.2.10' }}" class="mono">
+        <button type="button" class="btn-outline" hx-get="/ip/suggest?fresh=true&amp;backend={{ backend.id if backend else '' }}" hx-target="#ip-suggestions"
                 hx-indicator="#scan-spinner">Find free IPs</button>
         <span id="scan-spinner" class="htmx-indicator" aria-busy="true">Scanning…</span>
       </div>
-      <span class="hint">/{{ settings.ip_prefix }} · gateway {{ settings.ip_gateway or "not set" }} ·
-             DNS {{ (settings.ip_dns or [settings.ip_gateway]) | join(", ") }}</span>
+      {% if pool %}<span class="hint">/{{ pool.ip_prefix }} · gateway {{ pool.ip_gateway or "not set" }} ·
+             DNS {{ (pool.ip_dns or [pool.ip_gateway]) | join(", ") }}</span>{% endif %}
       <div id="ip-suggestions"></div>
     </div>
 
@@ -131,7 +159,7 @@
     <label class="field"><span class="label">Hostname</span>
       <input name="name" id="name" value="{{ form.name or '' }}" required pattern="[a-z][a-z0-9\-]{1,30}[a-z0-9]"
              placeholder="app01" autocomplete="off">
-      <span class="hint">Lowercase letters, digits and '-'. Also the VM name in vCenter.</span>
+      <span class="hint">Lowercase letters, digits and '-'. Also the VM name on {{ backend.name if backend else 'the backend' }}.</span>
     </label>
     <div data-needs="docker">
     <label class="field"><span class="label">compose.yaml <span class="muted" style="font-weight:400">(optional)</span></span>
@@ -141,7 +169,7 @@
     </div>
     <label class="check-field"><input type="checkbox" name="autostart" value="on" {% if form.autostart %}checked{% endif %}>
       <span><span class="label">Start with its host</span>
-        <span class="hint">Powers the VM on when its ESXi host starts, for example after a power cut.
+        <span class="hint">Powers the VM on when its host starts, for example after a power cut.
           You can change this later on the VM page.</span></span></label>
   </section>
 </div>

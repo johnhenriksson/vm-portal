@@ -4,6 +4,10 @@ packer {
       source  = "github.com/hashicorp/vsphere"
       version = "~> 2.0"
     }
+    proxmox = {
+      source  = "github.com/hashicorp/proxmox"
+      version = "~> 1.2"
+    }
   }
 }
 
@@ -87,7 +91,8 @@ source "vsphere-iso" "debian" {
 }
 
 build {
-  sources = ["source.vsphere-iso.debian"]
+  # One build per backend type: the portal runs `packer build -only=<type>-iso.*`.
+  sources = ["source.vsphere-iso.debian", "source.proxmox-iso.debian"]
 
   provisioner "shell" {
     environment_vars = ["DEBIAN_FRONTEND=noninteractive"]
@@ -118,8 +123,21 @@ build {
     ]
   }
 
-  # Must be last: generalizes the image for cloning.
+  # Proxmox: the QEMU guest agent reports the VM's addresses and shuts it down cleanly
+  # (VMware Tools does that on vSphere).
   provisioner "shell" {
-    script = "./scripts/cleanup.sh"
+    only = ["proxmox-iso.debian"]
+    inline = [
+      "set -eux",
+      "sudo DEBIAN_FRONTEND=noninteractive apt-get -y install qemu-guest-agent",
+      "sudo systemctl enable qemu-guest-agent",
+    ]
+  }
+
+  # Must be last: generalizes the image for cloning. On Proxmox, clones read cloud-init
+  # from the portal's seed ISO (NoCloud) instead of VMware guestinfo.
+  provisioner "shell" {
+    environment_vars = ["VMPORTAL_DATASOURCE=${source.type == "proxmox-iso" ? "NoCloud" : "VMware"}"]
+    script           = "./scripts/cleanup.sh"
   }
 }

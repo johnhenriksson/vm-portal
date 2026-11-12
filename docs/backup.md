@@ -2,8 +2,8 @@
 
 vm-portal can back up two things:
 
-- **Everything** (a *full backup*): users, settings, every VM's record and
-  OpenTofu state, custom image definitions, jobs and the audit log, and
+- **Everything** (a *full backup*): users, settings, the backends (vCenters
+  and Proxmox VE clusters), every VM's record and OpenTofu state, custom image definitions, jobs and the audit log, and
   optionally the job logs. Use it to recover from a lost or damaged data
   volume, or to move the portal to another host.
 - **Chosen VMs** (a *VM backup*): only those VMs' records and OpenTofu state.
@@ -14,7 +14,7 @@ Backups are made in the browser (**Settings → Backup**), on a schedule, or
 from the command line. Every backup is encrypted; there is no way to make an
 unencrypted one.
 
-> The OpenTofu state is how the portal knows which VM in vCenter is which.
+> The OpenTofu state is how the portal knows which VM on a backend is which.
 > Without it, the portal can still show and power a VM, but can't resize or
 > destroy it.
 
@@ -24,7 +24,7 @@ unencrypted one.
 |---|---|
 | Users with their password hashes and roles | The encryption key: stored secrets are re-encrypted with the target portal's own key on restore |
 | Settings stored in the portal | The session key and logged-out sessions: a restore logs everyone out |
-| The vCenter password stored in the portal (inside the encryption) | Anything set in the environment (`.env`, `compose.yaml`), such as `VSPHERE_PASSWORD`: set it again on the new host |
+| The backends, with the secrets stored in the portal (vCenter passwords, Proxmox API token secrets; inside the encryption) | Anything set in the environment (`.env`, `compose.yaml`), such as `VSPHERE_PASSWORD` or `PROXMOX_TOKEN_SECRET`: set it again on the new host |
 | Each VM's record, OpenTofu state and variables | The Packer build key: a new one is generated |
 | Custom image definitions (current version) | Their edit history, built-in images (they come with the portal), OpenTofu provider caches, saved plans |
 | Jobs and the audit log; job logs if you ask for them | Destroyed and forgotten VMs' archived files |
@@ -141,7 +141,7 @@ restore would, without changing anything. Opening a backup under
 
 Each resize and destroy first saves a copy of the VM's state. On the VM's page,
 under **OpenTofu state**, an admin can roll back to one of the last five copies.
-Only what the portal knows about the VM changes, not the VM in vCenter.
+Only what the portal knows about the VM changes, not the VM on its backend.
 
 Without a usable copy, import the VM from a backup instead: **Settings →
 Backup → Restore or import**, open the backup, tick the VM under **Import
@@ -153,14 +153,15 @@ On the same or a new host:
 
 1. Start a fresh portal: `docker compose up -d`, with the same `.env` as before
    if you have it (environment-only values such as `VSPHERE_PASSWORD` aren't in
-   the backup). Don't set `ADMIN_PASSWORD`.
+   the backup). A backup from before backends existed works too: its vCenter
+   settings become the first backend. Don't set `ADMIN_PASSWORD`.
 2. Open the portal. On the first-run page, choose **Restore a full backup
    instead**, enter the setup token from `docker compose logs portal`, the
    backup file and its passphrase or secret key.
 3. Check the summary and warnings, type `RESTORE` and confirm.
 4. Log in with an admin account from the backup.
 5. Under **Settings → Backup**, click **Check now** under *Check VMs against
-   vCenter*.
+   their backends*.
 
 Or from the command line, with the portal stopped:
 
@@ -188,7 +189,7 @@ Running `undo-restore` again switches back to the restored data.
 
 1. On the old host, make a full backup (or use the latest scheduled one).
 2. On the new host, restore it as in [Lost or damaged data volume](#lost-or-damaged-data-volume).
-3. Check the VMs against vCenter (**Settings → Backup → Check now**).
+3. Check the VMs against their backends (**Settings → Backup → Check now**).
 4. **Shut the old portal down for good** (`docker compose down`). Two portals
    managing the same VMs undo each other's changes. The restore preview warns
    when a backup comes from another installation.
@@ -199,8 +200,8 @@ To move only some VMs:
 2. Import it on the new portal and check the VMs there.
 3. On the old portal, open each moved VM and use **Forget** at the bottom of its
    page (admins only: type the VM's name and your password). The portal stops
-   managing the VM and leaves it running in vCenter, unchanged. Don't use
-   **Destroy** for this: that deletes the VM from vCenter.
+   managing the VM and leaves it running on its backend, unchanged. Don't use
+   **Destroy** for this: that deletes the VM.
 
 A forgotten VM's OpenTofu files are kept in `/data/forgotten/<name>-<id>` on
 the old portal. Forgotten one by mistake? Import it back from a backup.
@@ -209,14 +210,18 @@ the old portal. Forgotten one by mistake? Import it back from a backup.
 
 For each VM, the portal checks:
 
-- The state holds only what the portal's own OpenTofu module creates.
-- The variables hold only what the portal writes; old connection settings are
-  dropped.
-- In vCenter, the VM id in the state still belongs to a VM with that name. It
-  must not be a template, it must be in this portal's datacenter (and folder, if
-  set), and its vCenter notes must say vm-portal created it.
+- The state holds only what the portal's own OpenTofu module (for vSphere or
+  Proxmox VE: the state's provider says which) creates.
+- The variables hold only what the portal writes for that platform; old
+  connection settings are dropped.
+- The VM goes on the backend with the same name and type as in the backup, or
+  the only backend of its type here. With several of that type and none of
+  that name, rename the right one first.
+- On that backend, the VM id in the state still belongs to a VM with that
+  name. It must not be a template, it must be in the backend's datacenter (and
+  folder, if set) or pool, and its notes must say vm-portal created it.
 - The name and static IP aren't already in use in this portal.
-- An existing VM is never pointed at a different vCenter id.
+- An existing VM is never pointed at a different id.
 
 Owners are matched by username; a VM whose owner doesn't exist here goes to the
 importing admin.
@@ -277,7 +282,8 @@ age -d -i vm-portal-backup.key vm-portal-full-….vmpbak | tar -xz    # public-k
 age -d vm-portal-full-….vmpbak | tar -xz                             # passphrase backup (asks for it)
 ```
 
-You get `manifest.json`, `db/*.json` (database rows), `secrets.json` (the
-stored vCenter password, in plain text: handle with care), `vms/<name>/` (each
-VM's `terraform.tfstate`), `images/` and `jobs/`. With a VM's state and the
-module in `terraform/vm`, OpenTofu can manage that VM without the portal.
+You get `manifest.json`, `db/*.json` (database rows, including
+`db/backends.json`), `secrets.json` (the backends' stored secrets, in plain
+text: handle with care), `vms/<name>/` (each VM's `terraform.tfstate`),
+`images/` and `jobs/`. With a VM's state and the module in `terraform/vm` (or
+`terraform/proxmox`), OpenTofu can manage that VM without the portal.

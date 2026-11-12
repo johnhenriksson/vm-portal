@@ -1,0 +1,11 @@
+{# The VM page's power-action banner; the page polls /vms/<name>/status for it. #}
+{% if pending and (pending.running or not pending.announced) %}
+  {% if pending.running %}
+  <div class="alert warn" role="status"><span aria-busy="true"></span>{{ pending.message }}
+    <span class="muted">({{ pending.elapsed }}s, asked by {{ pending.by }})</span></div>
+  {% elif pending.outcome == "done" %}
+  <div class="alert ok" role="status">{{ pending.message }}</div>
+  {% else %}
+  <div class="alert" role="alert">{{ pending.message }}</div>
+  {% endif %}
+{% endif %}

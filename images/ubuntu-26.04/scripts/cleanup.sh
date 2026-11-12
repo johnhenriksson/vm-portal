@@ -1,7 +1,8 @@
 #!/bin/bash
 # Generalize the VM before it becomes a template. Cloud-init stays ENABLED so
 # Terraform clones can be configured via guestinfo.userdata/metadata
-# (VMware datasource): hostname, network, SSH keys, compose files, etc.
+# (VMware datasource) or a NoCloud seed ISO on Proxmox: hostname, network,
+# SSH keys, compose files, etc.
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -30,10 +31,13 @@ if sudo grep -rlE 'config:\s*disabled' /etc/cloud/cloud.cfg.d/; then
   echo "cloud-init network config is still disabled by the files above" >&2
   exit 1
 fi
-# Look for config in VMware guestinfo (Terraform extra_config). Fall back to
-# None, which still runs cloud-init with DHCP networking and new host keys.
-echo 'datasource_list: [ VMware, None ]' | sudo tee /etc/cloud/cloud.cfg.d/90_dpkg.cfg > /dev/null
-echo 'cloud-init-base cloud-init-base/datasources multiselect VMware, None' | sudo debconf-set-selections
+# Look for config in VMware guestinfo (Terraform extra_config), or on Proxmox in the
+# portal's NoCloud seed ISO (the build sets VMPORTAL_DATASOURCE). Fall back to None,
+# which still runs cloud-init with DHCP networking and new host keys.
+DS="${VMPORTAL_DATASOURCE:-VMware}"
+case "$DS" in VMware|NoCloud) ;; *) echo "bad VMPORTAL_DATASOURCE" >&2; exit 1 ;; esac
+echo "datasource_list: [ $DS, None ]" | sudo tee /etc/cloud/cloud.cfg.d/90_dpkg.cfg > /dev/null
+echo "cloud-init-base cloud-init-base/datasources multiselect $DS, None" | sudo debconf-set-selections
 # cloud-init's default user is "ubuntu"; make it the existing build user so
 # user-data without a users: list doesn't create a second account.
 sudo tee /etc/cloud/cloud.cfg.d/91-default-user.cfg > /dev/null <<EOF

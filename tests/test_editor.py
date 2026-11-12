@@ -111,8 +111,7 @@ def test_create_vm_respects_image_features(data_dir, monkeypatch):
     from app.platforms import vsphere
     make_custom(data_dir, features=[])
     t = vsphere.VMInfo("acme-1-20261105-1200", True)
-    monkeypatch.setattr(vsphere, "templates", lambda: [t])
-    monkeypatch.setattr("app.main.vcenter_configured", lambda s=None: True)
+    monkeypatch.setattr(vsphere, "templates", lambda b: [t])
     with client() as c:
         login(c)
         page = c.get("/vms/new").text
@@ -121,6 +120,26 @@ def test_create_vm_respects_image_features(data_dir, monkeypatch):
                                  "disk_gb": 40, "compose_yaml": "services:\n  a:\n    image: x\n",
                                  "csrf_token": csrf(c, "/vms/new")})
         assert r.status_code == 400 and "no Docker" in r.text
+
+
+def test_disk_cannot_be_smaller_than_the_templates(data_dir, monkeypatch):
+    """A clone's disk is never smaller than its template's, so the wizard doesn't offer it
+    and the server refuses it, instead of quietly creating a bigger disk."""
+    from app.platforms import vsphere
+    make_custom(data_dir)
+    known = vsphere.VMInfo("acme-1-20261105-1200", True, disk_gb=50)
+    unknown = vsphere.VMInfo("acme-1-20261101-1200", True)       # falls back to the image's build size
+    monkeypatch.setattr(vsphere, "templates", lambda b: [known, unknown])
+    with client() as c:
+        login(c)
+        page = c.get("/vms/new").text
+        assert 'data-min-disk="50"' in page and 'data-min-disk="25"' in page
+        assert 'name="disk_gb" id="disk_gb" min="10" data-floor="10" value="50"' in page   # default raised to fit
+        base = {"name": "deb01", "cpus": 2, "memory_mb": 2048, "ssh_keys": "ssh-ed25519 AAAAkey a@b"}
+        r = c.post("/vms", data={**base, "template": known.name, "disk_gb": 40, "csrf_token": csrf(c, "/vms/new")})
+        assert r.status_code == 400 and "smaller than 50 GB" in r.text
+        r = c.post("/vms", data={**base, "template": unknown.name, "disk_gb": 20, "csrf_token": csrf(c, "/vms/new")})
+        assert r.status_code == 400 and "smaller than 25 GB" in r.text
 
 
 def test_editor_form_targets_the_open_file(editing, data_dir):

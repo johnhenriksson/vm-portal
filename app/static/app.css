@@ -220,6 +220,7 @@ details.menu[open] > summary::after { transform: translateY(2px) rotate(-135deg)
 }
 .menu-list a:hover, .menu-list button:hover { background: var(--bg-subtle); text-decoration: none; }
 .menu-list hr { margin: .35rem 0; }
+.menu-list .menu-note { margin: 0; padding: .5rem 1rem; max-width: 260px; color: var(--muted); font-size: 13px; }
 .menu-list .danger { color: var(--red); }
 
 /* ---- status ------------------------------------------------------------ */
@@ -232,6 +233,7 @@ details.menu[open] > summary::after { transform: translateY(2px) rotate(-135deg)
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .badge.ready, .badge.succeeded, .badge.poweredOn { background: var(--green-tint); color: var(--green); }
 .badge.failed, .badge.stale { background: var(--red-tint); color: var(--red); }
+.badge.cancelled { background: var(--border); color: var(--muted); }
 .badge.provisioning, .badge.destroying, .badge.running, .badge.queued { background: var(--blue-tint); color: var(--blue); }
 .badge.provisioning::before, .badge.destroying::before, .badge.running::before { animation: pulse 1.2s infinite; }
 .badge.stale { text-transform: none; }
@@ -343,6 +345,7 @@ dl.props dd.notes { white-space: pre-line; overflow-wrap: anywhere; }
 .step.on .dot { background: var(--blue); border-color: #c6dcff; }
 .step:has(input:checked) .dot { background: #fff; border: 7px solid var(--blue); box-shadow: 0 0 0 4px #c6dcff; }
 .step:has(input:checked) { color: var(--navy); font-weight: 600; }
+.step.off { opacity: .35; cursor: not-allowed; }
 .step:has(input:focus-visible) .dot { outline: 2px solid var(--blue); outline-offset: 3px; }
 .custom-size { margin-top: .75rem; }
 .custom-size summary { cursor: pointer; color: var(--blue); font-size: 13px; }
@@ -412,6 +415,7 @@ pre.log {
   animation: spin .7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+button.sending, .btn.sending { opacity: .8; cursor: progress; }
 .htmx-indicator { display: none; color: var(--muted); }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
 
@@ -467,7 +471,6 @@ input:disabled, select:disabled, textarea:disabled { background: var(--bg-subtle
 }
 .stepbar .s.done { color: #fff; }
 .stepbar .s.done .n { background: rgba(255,255,255,.2); }
-select:disabled { background: var(--bg-subtle); }
 .grid-2, .grid-3 { row-gap: .25rem; }
 
 /* ---- console ----------------------------------------------------------- */
@@ -492,7 +495,6 @@ select:disabled { background: var(--bg-subtle); }
 .def-desc { font-size: 13px; margin: .75rem 0; }
 .def-actions { display: flex; gap: .5rem; align-items: center; padding: .75rem 1.25rem; border-top: 1px solid var(--border); }
 .def-actions form { margin-left: auto; }
-.version-select { width: auto; padding: .35rem .5rem; font-size: 13px; }
 .editor-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 1.5rem; align-items: start; }
 .file-list { border: 1px solid var(--border); border-radius: var(--radius); padding: .35rem 0; }
 .file-list a { display: block; padding: .35rem 1rem; color: var(--text); font-family: var(--mono); font-size: 12.5px;
@@ -548,3 +550,48 @@ pre.check { background: var(--bg-subtle); border: 1px solid var(--border); borde
 .backup-summary { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1.25rem; margin: 0 0 1.25rem; }
 .backup-summary dt { color: var(--muted); }
 .backup-summary dd { margin: 0; }
+
+/* ---- dropdowns ---------------------------------------------------------
+   One look for every <select>: the text-input box with the chevron of the "More" menus,
+   instead of each browser's own arrow and height. */
+select {
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  padding-right: 2.25rem; line-height: 1.4; text-overflow: ellipsis;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%235b6987' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.5 1.5 6 6l4.5-4.5'/%3E%3C/svg%3E"); background-repeat: no-repeat;
+  background-position: right .8rem center; background-size: 11px 7px;
+}
+input[type=text], input[type=password], input[type=number], input:not([type]) { line-height: 1.4; }
+select:hover:not(:disabled):not(:focus) { border-color: var(--faint); }
+select:hover:not(:disabled), select:focus { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%230069ff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.5 1.5 6 6l4.5-4.5'/%3E%3C/svg%3E"); }
+/* Nothing to choose: no arrow, and the placeholder (or the hint below) says why. */
+select:disabled { background-image: none; padding-right: .75rem; cursor: not-allowed; opacity: 1; }
+select:invalid, select:has(option[value=""]:checked) { color: var(--muted); }
+select option { color: var(--navy); }
+select.compact { width: auto; max-width: 100%; padding: .35rem 1.9rem .35rem .6rem; font-size: 13px;
+  background-position: right .6rem center; background-size: 10px 6px; }
+select.compact:disabled { padding-right: .6rem; border-color: var(--border); }
+.row > select { width: auto; min-width: 12rem; max-width: 100%; }
+.field-narrow { max-width: 22rem; }
+.backend-picker { align-items: flex-end; margin-bottom: 1.75rem; }
+.backend-picker .field { margin: 0; flex: 1; min-width: 14rem; }
+.backend-picker .hint { flex-basis: 100%; margin: 0; }
+
+/* a choice between a few things, as cards */
+fieldset.choice-field { border: 0; padding: 0; margin: 0 0 1.25rem; min-width: 0; }
+fieldset.choice-field > legend { padding: 0; }
+.card-choice { align-content: start; }
+.card-choice:hover:not(:has(input:checked)) { border-color: var(--faint); }
+.card-choice:has(input:focus-visible) { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 105, 255, .15); }
+.card-choice input:focus-visible { outline: none; }
+
+/* menus: what the keyboard is on */
+details.menu > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 2px; }
+.menu-list a:focus-visible, .menu-list button:focus-visible { outline: none; background: var(--blue-tint); }
+
+/* phones: tables keep the columns needed to find a row and act on it (the rest is on the
+   row's own page), and long names wrap instead of pushing the page sideways */
+@media (max-width: 760px) {
+  .wide-only { display: none; }
+  th, td { padding-left: .6rem; padding-right: .6rem; }
+  td .title, td .meta { overflow-wrap: anywhere; }
+}

@@ -40,6 +40,7 @@ os: {family: linux, distro: ubuntu, version: "26.04"}   # distro picks the icon
 guest: cloud-init                      # guest driver used for clones (app/guests/)
 features: [docker]                     # optional: enables compose.yaml on create
 template_prefix: ubuntu-2604-docker    # templates are named <prefix>-YYYYMMDD-HHMM
+platforms: [vsphere, proxmox]          # backend types it builds on; default [vsphere]
 login_user_parameter: ssh_username     # or `login_user: <name>` for a fixed user
 network_interface: "en*"               # NIC name for static IPs (below); default "en*"
 build: {cpus: 2, memory_mb: 2048, disk_mb: 25600}   # defaults, editable per image
@@ -55,6 +56,16 @@ Parameters become `PKR_VAR_<name>`. Every value is checked against its anchored
 `pattern` before a build, so a parameter can't smuggle extra lines into a
 generated file. Still quote values when templating them (e.g. `jsonencode()`).
 
+## One definition, every backend type
+
+A build runs on one backend. For each type in `platforms`, the definition has a
+Packer source of that type: `vsphere-iso.<name>` for vSphere, `proxmox-iso.<name>`
+for Proxmox VE (the built-in ones keep it in `proxmox.pkr.hcl`), and the portal
+runs `packer build -only=<type>-iso.*`. The `build` block lists both sources, so
+the install steps are shared; a step for one type only takes
+`only = ["proxmox-iso.<name>"]`. The other type's variables aren't set on a
+build, so give them defaults (`default = ""`).
+
 ## Variables the portal passes
 
 The portal sets these for every build (as `PKR_VAR_*`). Declare the ones your
@@ -62,16 +73,19 @@ template uses; Packer ignores the rest.
 
 | Variable | Type | Value |
 |---|---|---|
-| `vsphere_server`, `vsphere_user`, `vsphere_password` | string | vCenter connection |
-| `vsphere_insecure` | bool | skip TLS verification (Settings → vCenter) |
+| `vsphere_server`, `vsphere_user`, `vsphere_password` | string | vCenter connection (builds on a vCenter backend) |
+| `vsphere_insecure` | bool | skip TLS verification (the backend's setting) |
 | `vsphere_datacenter`, `vsphere_cluster`, `vsphere_datastore`, `vsphere_network`, `vsphere_folder` | string | placement |
+| `proxmox_url`, `proxmox_token_id`, `proxmox_token_secret` | string | Proxmox VE API and token (builds on a Proxmox backend). With a pinned certificate the portal sets `SSL_CERT_FILE` to exactly that certificate, so leave `insecure_skip_tls_verify` false |
+| `proxmox_node`, `proxmox_storage`, `proxmox_iso_storage`, `proxmox_bridge`, `proxmox_pool` | string | placement (the backend's own node: templates are built there) |
+| `proxmox_vlan` | string | the backend's VLAN tag, `""` when untagged: give it to the network adapter as `vlan_tag`. A definition copied before this variable existed builds untagged until it declares and uses it |
 | `vm_name` | string | the new template's name (`<template_prefix>-YYYYMMDD-HHMM`) |
 | `template_prefix` | string | from the manifest |
-| `iso_url` | string | datastore path of the installer ISO |
+| `iso_url` | string | the installer ISO on the backend: `[datastore] path/file.iso` on vSphere, a volume id such as `local:iso/file.iso` on Proxmox |
 | `vm_cpu_num`, `vm_mem_size`, `vm_disk_size` | number | build VM size (MB for memory and disk) |
 | `ssh_private_key_file` | string | the portal's build key (private half) |
 | `ssh_authorized_keys` | list(string) | the build key's public half |
-| `http_ip` | string | address build VMs reach the portal at, for Packer's HTTP server (`http_content`). Settings → Images, or the address the portal uses to reach vCenter |
+| `http_ip` | string | address build VMs reach the portal at, for Packer's HTTP server (`http_content`). Settings → Images, or the address the portal uses to reach the backend's API |
 
 ## Rules for definitions
 
@@ -79,9 +93,19 @@ template uses; Packer ignores the rest.
   `ssh_authorized_keys` for the build and remove them at the end (see
   `ubuntu-26.04/scripts/cleanup.sh`); clones get their keys from the guest driver.
 - **Generalise the template:** remove SSH host keys and machine-id, clean
-  cloud-init (`cloud-init clean`), and leave the guest agent (open-vm-tools) installed.
-- **Linux with `guest: cloud-init`** needs cloud-init's VMware datasource enabled
-  (`datasource_list: [ VMware, None ]`) so clones read `guestinfo.metadata/userdata`.
+  cloud-init (`cloud-init clean`), and leave the guest agent installed
+  (open-vm-tools on vSphere, qemu-guest-agent on Proxmox: the portal waits for it
+  after a Proxmox VM's first boot, to clean up its seed ISO).
+  On Proxmox the installer itself must install `qemu-guest-agent` (kickstart
+  `%packages`, preseed `pkgsel/include`, autoinstall `packages`): Packer learns
+  the build VM's address from the agent, so without it the build waits for SSH
+  until it times out.
+- **Linux with `guest: cloud-init`** needs cloud-init's datasource for the
+  platform: VMware on vSphere (`datasource_list: [ VMware, None ]`, clones read
+  `guestinfo.metadata/userdata`), NoCloud on Proxmox (the portal attaches a seed
+  ISO labelled CIDATA). The built-in cleanup scripts take it from
+  `VMPORTAL_DATASOURCE`, which the build sets from `source.type`. Don't add a
+  Proxmox cloud-init drive (`cloud_init = false`): it would be a second datasource.
   Keep cloud-init disabled during the build (`/etc/cloud/cloud-init.disabled`)
   and remove that file in the cleanup script, so the build VM doesn't configure itself.
 - **Static IPs:** the portal sends a netplan-style (v2) network config for the
@@ -95,9 +119,9 @@ template uses; Packer ignores the rest.
 - **Windows** needs a guest driver that doesn't exist yet (sysprep or
   cloudbase-init). The manifest schema and the driver interface
   (`app/guests/__init__.py`) are ready for it.
-- Only the vSphere Packer plugin is pre-installed. A definition that needs
-  another plugin will fail at `packer init`, because the image has no writable
-  plugin directory.
+- Only the vSphere and Proxmox Packer plugins are pre-installed. A definition
+  that needs another plugin will fail at `packer init`, because the image has no
+  writable plugin directory.
 
 ## Building outside the portal
 

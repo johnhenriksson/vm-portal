@@ -20,7 +20,9 @@ sshkey --username=${username} ${jsonencode(key)}
 
 selinux --enforcing
 firewall --enabled --service=ssh
-services --enabled=sshd,vmtoolsd
+# Both guest agents: each only runs on its own hypervisor. On Proxmox, Packer finds the
+# build VM's address through the QEMU agent, so it must come with the install.
+services --enabled=sshd,vmtoolsd,qemu-guest-agent
 firstboot --disable
 
 # One disk, LVM; grow-root extends the root LV on clones.
@@ -34,6 +36,7 @@ reboot --eject
 %packages
 @^minimal-environment
 open-vm-tools
+qemu-guest-agent
 cloud-init
 cloud-utils-growpart
 lvm2

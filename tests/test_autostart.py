@@ -8,7 +8,7 @@ from app import db, provision, users
 from app.platforms import vsphere
 from app.backup import checks
 
-from backup_helpers import admin, make_vm
+from backup_helpers import admin, make_vm, vc
 from tests.test_web import client, csrf, login
 
 
@@ -34,7 +34,7 @@ def host(monkeypatch):
     vm = vim.VirtualMachine("vm-42")
     mgr = FakeAutoStartManager([entry("vm-7", "powerOn")])
     h = SimpleNamespace(name="esx1", configManager=SimpleNamespace(autoStartManager=mgr))
-    monkeypatch.setattr(vsphere, "_find_vm_locked", lambda name, moid: vm)
+    monkeypatch.setattr(vsphere, "_find_vm_locked", lambda b, name, moid: vm)
     monkeypatch.setattr(vsphere, "_host_of", lambda v: h)
     return mgr
 
@@ -49,14 +49,15 @@ def test_spec_touches_only_this_vm():
 
 
 def test_read_and_set(host):
-    assert vsphere.autostart("web-01", "vm-42") == vsphere.Autostart(False, "esx1", True)  # no entry yet
-    assert vsphere.set_autostart("web-01", "vm-42", True).enabled
-    assert vsphere.autostart("web-01", "vm-42").enabled
-    assert not vsphere.set_autostart("web-01", "vm-42", False).enabled
+    b = vc()
+    assert vsphere.autostart(b, "web-01", "vm-42") == vsphere.Autostart(False, "esx1", True)  # no entry yet
+    assert vsphere.set_autostart(b, "web-01", "vm-42", True).enabled
+    assert vsphere.autostart(b, "web-01", "vm-42").enabled
+    assert not vsphere.set_autostart(b, "web-01", "vm-42", False).enabled
     assert [p.key._moId for p in host.config.powerInfo] == ["vm-7", "vm-42"]  # other VMs untouched
     assert host.config.powerInfo[0].startAction == "powerOn"
     host.config.defaults.enabled = False
-    assert not vsphere.autostart("web-01", "vm-42").host_enabled
+    assert not vsphere.autostart(b, "web-01", "vm-42").host_enabled
 
 
 # --- create -----------------------------------------------------------------------------
@@ -79,20 +80,20 @@ async def test_create_job_only_warns_when_autostart_fails(monkeypatch):
         raise RuntimeError("no permission")
     monkeypatch.setattr(vsphere, "set_autostart", down)
     log = Log()
-    await provision.enable_autostart("web-01", log)
+    await provision.enable_autostart(vc(), "web-01", log)
     assert "Warning: couldn't turn on autostart (no permission)" in log.text
 
     calls = []
     monkeypatch.setattr(vsphere, "set_autostart",
                         lambda *a: calls.append(a) or vsphere.Autostart(True, "esx1", False))
     log = Log()
-    await provision.enable_autostart("web-01", log)
-    assert calls == [("web-01", "vm-42", True)]       # by the VM's id from its state
+    await provision.enable_autostart(vc(), "web-01", log)
+    assert [c[1:] for c in calls] == [("web-01", "vm-42", True)]       # by the VM's id from its state
     assert "esx1 has autostart turned off" in log.text
 
 
 def test_create_form_is_ticked_by_default_and_is_stored(monkeypatch):
-    monkeypatch.setattr(vsphere, "templates", lambda: [])
+    monkeypatch.setattr(vsphere, "templates", lambda b: [])
     with client() as c:
         admin()
         login(c, "admin2", "correct horse battery")
@@ -101,7 +102,7 @@ def test_create_form_is_ticked_by_default_and_is_stored(monkeypatch):
     monkeypatch.setattr(provision.jobs, "submit", lambda *a, **kw: 1)
     for on in (True, False):
         req = provision.VMRequest(name=f"vm{int(on)}-x", template="t", cpus=1, memory_mb=1024, disk_gb=10,
-                                  autostart=on)
+                                  autostart=on, backend_id=vc().id)
         provision.create(req)
         reqs.append(db.active_vm(req.name)["autostart"])
     assert reqs == [1, 0]
@@ -119,11 +120,11 @@ def page(monkeypatch):
     make_vm()
     state = {"live": vsphere.Autostart(False, "esx1", True), "fail": None, "calls": []}
     monkeypatch.setattr(vsphere, "vms_by_name",
-                        lambda fresh=False: {"web-01": vsphere.VMInfo("web-01", False, "poweredOn")})
-    monkeypatch.setattr(vsphere, "templates", lambda: [])
-    monkeypatch.setattr(vsphere, "autostart", lambda name, moid: state["live"])
+                        lambda b, fresh=False: {"web-01": vsphere.VMInfo("web-01", False, "poweredOn")})
+    monkeypatch.setattr(vsphere, "templates", lambda b: [])
+    monkeypatch.setattr(vsphere, "autostart", lambda b, name, moid: state["live"])
 
-    def set_(name, moid, on):
+    def set_(b, name, moid, on):
         state["calls"].append((name, moid, on))
         if state["fail"]:
             raise RuntimeError(state["fail"])

@@ -6,7 +6,7 @@
 {% block title %}Images · VM Portal{% endblock %}
 {% block content %}
 <div class="page-head">
-  <div><h1>Images</h1><p class="sub">Templates in vCenter, and the image definitions the portal builds them from.</p></div>
+  <div><h1>Images</h1><p class="sub">Templates on the portal's backends, and the image definitions the portal builds them from.</p></div>
 </div>
 
 <nav class="tabs">
@@ -76,9 +76,10 @@
       <div class="def-actions">
         <a href="/images/defs/{{ d.img.id }}" class="btn btn-outline btn-sm">Configure</a>
         <a href="/images/defs/{{ d.img.id }}/files" class="btn btn-ghost btn-sm">{{ "Edit files" if (not d.img.builtin and editing_enabled) else "View files" }}</a>
-        {% if m and not d.problems and not d.building %}
-        <form method="post" action="/images/defs/{{ d.img.id }}/build" data-confirm="Build a new {{ m.name }} template? It takes a while.">
-          {{ csrf_field(request) }}<button class="btn-sm">Build</button></form>
+        {% set ready = d.targets | selectattr("problems", "equalto", []) | rejectattr("building") | list %}
+        {% if m and not d.problems and ready | length == 1 %}
+        <form method="post" action="/images/defs/{{ d.img.id }}/build" data-confirm="Build a new {{ m.name }} template on {{ ready[0].backend.name }}? It takes a while.">
+          {{ csrf_field(request) }}<input type="hidden" name="backend_id" value="{{ ready[0].backend.id }}"><button class="btn-sm">Build</button></form>
         {% endif %}
       </div>
     </div>
@@ -106,20 +107,22 @@
       {% if g.image %}<a href="/images/defs/{{ g.image.id }}">Image settings</a>{% endif %}</div>
     <div class="table-wrap">
     <table>
-      <thead><tr><th>Template</th><th>Built</th><th>Age</th><th>Notes</th><th></th></tr></thead>
+      <thead><tr><th>Template</th>{% if backend_count > 1 %}<th>Backend</th>{% endif %}<th class="wide-only">Built</th><th>Age</th><th class="wide-only">Notes</th><th></th></tr></thead>
       <tbody>
       {% for t in g.templates %}
         <tr>
           <td><div class="name-cell">{{ os_icon(g.image.manifest.os.distro if g.image else "") }}
             {{ link(links.image(g.image.id if g.image else None), t.name, "title") }}</div></td>
-          <td>{{ t.created.strftime("%Y-%m-%d %H:%M") if t.created else "–" }}</td>
+          {% if backend_count > 1 %}<td>{{ t.backend }}</td>{% endif %}
+          <td class="wide-only">{{ t.created.strftime("%Y-%m-%d %H:%M") if t.created else "–" }}</td>
           <td>{{ age(t, settings.template_max_age_days) }}</td>
-          <td>{% if loop.first %}<span class="badge default plain">Default</span>{% else %}<span class="muted">Older version</span>{% endif %}</td>
+          {% set is_default = (t.backend, t.name) in defaults %}
+          <td class="wide-only">{% if is_default %}<span class="badge default plain">Default</span>{% else %}<span class="muted">Older version</span>{% endif %}</td>
           <td class="right">
-            {% if not loop.first %}
+            {% if not is_default and backends.get(t.backend) %}
             <details class="menu"><summary>More</summary>
               <div class="menu-list">
-                <form method="post" action="/images/templates/{{ t.name | urlencode }}/delete" data-confirm="Delete template {{ t.name }}?">
+                <form method="post" action="/images/templates/{{ backends[t.backend].id }}/{{ t.name | urlencode }}/delete" data-confirm="Delete template {{ t.name }} from {{ t.backend }}?">
                   {{ csrf_field(request) }}<button class="danger">Delete</button></form>
               </div></details>
             {% endif %}

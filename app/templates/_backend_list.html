@@ -1,0 +1,43 @@
+{# Settings → Backends: the list, and adding one. #}
+<p class="muted">Backends are the vCenters and Proxmox VE clusters the portal creates VMs on. Each has its own
+  connection, placement and IP pool; users choose one when they create a VM (when there's more than one they may use).</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Name</th><th>Type</th><th class="wide-only">Server</th><th class="wide-only">VMs</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {% for r in backend_rows %}
+    <tr>
+      <td><a class="title" href="/settings/backends/{{ r.b.id }}">{{ r.b.name }}</a>
+        {% if r.b.from_env %}<span class="meta">from the environment</span>{% endif %}</td>
+      <td>{{ r.b.platform.LABEL }}{% if not r.b.platform.CAN_PROVISION %} <span class="badge plain">preview</span>{% endif %}</td>
+      <td class="mono wide-only">{{ r.server or "–" }}</td>
+      <td class="wide-only">{{ r.vms }}</td>
+      <td>{% if not r.b.configured %}<span class="badge failed">Not set up</span>
+          {% elif not r.b.enabled %}<span class="badge plain">Disabled</span>
+          {% else %}<span class="badge succeeded">Enabled</span>{% if r.b.admin_only %} <span class="badge plain">admins only</span>{% endif %}{% endif %}</td>
+      <td class="right"><a href="/settings/backends/{{ r.b.id }}" class="btn btn-outline btn-sm">Edit</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="empty">No backends yet. Add one below.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<form method="post" action="/settings/backends" class="card" style="margin-top:1.5rem;max-width:52rem">
+  <div class="card-head">Add a backend</div>
+  <div class="card-body">
+    {{ csrf_field(request) }}
+    <label class="field field-narrow"><span class="label">Name</span>
+      <input type="text" name="name" required maxlength="40" value="{{ new_name or '' }}" placeholder="e.g. Proxmox Oslo" autocomplete="off"></label>
+    <fieldset class="field choice-field"><legend class="label">Type</legend>
+      <div class="card-choices">
+        {% for value, label, summary in types %}
+        <label class="card-choice"><input type="radio" name="type" value="{{ value }}" {% if loop.first %}checked{% endif %}>
+          <span class="card-choice-title">{{ label }}</span>
+          <span class="card-choice-body">{{ summary }}</span></label>
+        {% endfor %}
+      </div></fieldset>
+    <button>Add and set up</button>
+  </div>
+</form>

@@ -21,6 +21,8 @@ def test_generated_key_is_private_and_stable(data_dir):
     assert packer.public_key() == pub  # not regenerated on every call
     assert packer.fingerprint().startswith("SHA256:")
 
+from backup_helpers import vc
+
 
 def _ubuntu():
     from app import images
@@ -30,7 +32,7 @@ def _ubuntu():
 
 def test_packer_env_passes_matching_key_pair(data_dir):
     img, cfg = _ubuntu()
-    env = packer.packer_env(img, cfg, "ubuntu-2604-docker-20261105-1200")
+    env = packer.packer_env(img, cfg, "ubuntu-2604-docker-20261105-1200", vc())
     assert env["PKR_VAR_vm_name"] == "ubuntu-2604-docker-20261105-1200"
     assert env["PKR_VAR_vsphere_insecure"] in ("true", "false")
     assert env["PKR_VAR_keyboard_layout"] == "us" and env["PKR_VAR_ssh_username"] == "ubuntu"
@@ -59,6 +61,14 @@ def test_external_key_is_used_not_regenerated(data_dir, monkeypatch, tmp_path):
 
 def test_preflight_per_image(data_dir):
     img, cfg = _ubuntu()
-    problems = packer.preflight(img, cfg)
-    assert any("installer ISO" in p for p in problems)
+    problems = packer.preflight(img, cfg, vc())
+    assert any("installer ISO for vCenter" in p for p in problems)
     assert not any("SSH key" in p for p in problems)
+
+
+def test_validation_covers_every_platform_without_contacting_one(data_dir):
+    from app import editor, images
+    env = editor.validation_env(images.get("ubuntu-26.04"))
+    assert env["PKR_VAR_vsphere_server"] == "192.0.2.1" and env["PKR_VAR_proxmox_url"].startswith("https://192.0.2.1")
+    assert env["PKR_VAR_iso_url"] and "SSL_CERT_FILE" not in env      # no certificate fetched from anywhere
+    assert "vc-secret" not in str(env)                                  # nor the real backend's secret

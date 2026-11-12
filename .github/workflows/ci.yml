@@ -19,7 +19,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
+      - name: Install Chromium for the browser tests (tests/ui)
+        run: playwright install --with-deps chromium
       - run: pytest -q
+        env:
+          UI_REQUIRED: "1"   # the browser tests must run here, not be skipped
       - name: Audit Python dependencies
         run: pip install pip-audit && pip-audit -r requirements.txt
 
@@ -39,3 +43,11 @@ jobs:
               print(img.id, out)
               assert ok
           "
+      - name: Validate the OpenTofu modules (vSphere, Proxmox VE) with the bundled providers
+        run: |
+          docker run --rm --entrypoint sh vm-portal:ci -ec '
+          for m in vm proxmox; do
+            cp -r /app/terraform/$m /tmp/$m
+            tofu -chdir=/tmp/$m init -input=false -backend=false > /dev/null
+            tofu -chdir=/tmp/$m validate
+          done'

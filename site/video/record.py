@@ -169,6 +169,22 @@ class Director:
         self.ring = None
         self.hold(settle)
 
+    def choose(self, sel: str, value: str) -> None:
+        """Pick an option of a dropdown whose form sends itself (a native dropdown's list
+        isn't part of the page, so it can't be filmed): press it, and the page changes."""
+        self.move(sel)
+        for i in range(5):
+            self.ring = i / 5
+            self.frame()
+        with self.page.expect_navigation(wait_until="load"):
+            self.page.select_option(sel, value)
+        self.page.wait_for_timeout(150)
+        for i in range(5, 9):
+            self.ring = i / 9
+            self.frame()
+        self.ring = None
+        self.hold(0.25)
+
     def type(self, sel: str, text: str) -> None:
         self.click(sel, settle=0.15)
         self.page.keyboard.press("Control+A")
@@ -201,6 +217,9 @@ class Director:
         self.title_end = self.t
 
 
+PROXMOX_BACKEND = "2"      # demo_server.py adds it after the vCenter
+
+
 def tour(d: Director) -> None:
     long = L["long"]
     page = d.page
@@ -217,6 +236,12 @@ def tour(d: Director) -> None:
     d.caption("Create a VM in a few clicks", "Pick an image, a size and an address")
     d.click("nav a[href='/vms/new']", nav=True)
     d.hold(0.6)
+    if long:
+        d.caption("vSphere and Proxmox VE, side by side", "Each backend has its own templates and addresses")
+        d.hold(0.5)
+        d.choose(".backend-picker select", PROXMOX_BACKEND)
+        d.hold(1.6)
+        d.caption("Pick an image, a size and an address", "The same form on every backend")
     d.click("label.choice:has-text('Debian')", at=(0.3, 0.5))
     d.click("[data-slider=cpus] label.step:has-text('4 vCPU')")
     d.click("[data-slider=memory_mb] label.step:has-text('8GB')")
@@ -371,10 +396,10 @@ def main() -> None:
         pg = overlay_page(browser)
         caps = [{"png": caption_png(pg, i, c["text"], c["sub"]), "start": round(c["start"], 3),
                  "end": round(c["end"], 3)} for i, c in enumerate(d.captions)]
-        title = card(pg, "title.png", "Open source · Self-hosted", "Self-service VMs on your own vSphere",
+        title = card(pg, "title.png", "Open source · Self-hosted", "Self-service VMs on vSphere and Proxmox VE",
                      "Users create VMs in a few clicks. Admins build the templates with Packer.", "")
-        end = card(pg, "end.png", "Open source · Apache-2.0", "Self-service VMs on your own vSphere",
-                   "One container next to your vCenter.", REPO_URL)
+        end = card(pg, "end.png", "Open source · Apache-2.0", "Self-service VMs on vSphere and Proxmox VE",
+                   "One container next to your vCenter or Proxmox VE cluster.", REPO_URL)
         meta = {"canvas": L["canvas"], "frame": L["frame"], "fps": FPS, "frames": d.timeline,
                 "total": round(d.t, 3), "chrome": chrome(pg), "captions": caps,
                 "title": {"png": title, "end": round(d.title_end, 3)},

@@ -20,7 +20,7 @@
     <div class="nav-label">Manage</div>
     <nav class="nav">
       <a href="/" class="{{ 'active' if nav_path == '/' or (nav_path.startswith('/vms') and nav_path != '/vms/new') }}">{{ icon("server") }} Virtual machines</a>
-      <a href="/vms/new" class="{{ 'active' if nav_path == '/vms/new' }}">{{ icon("plus") }} Create VM</a>
+      {% if can_create %}<a href="/vms/new" class="{{ 'active' if nav_path == '/vms/new' }}">{{ icon("plus") }} Create VM</a>{% endif %}
       {% if is_admin %}<a href="/images" class="{{ 'active' if nav_path.startswith('/images') }}">{{ icon("image") }} Images</a>{% endif %}
       <a href="/jobs" class="{{ 'active' if nav_path.startswith('/jobs') }}">{{ icon("jobs") }} Jobs</a>
     </nav>
@@ -42,6 +42,8 @@
     <main class="page">
       {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
       {% if notice %}<div class="alert ok" role="status">{{ notice }}</div>{% endif %}
+      {% if flash_error %}<div class="alert" role="alert">{{ flash_error }}</div>{% endif %}
+      {% if flash_notice %}<div class="alert ok" role="status" data-flash>{{ flash_notice }}</div>{% endif %}
       {% block content %}{% endblock %}
     </main>
   </div>

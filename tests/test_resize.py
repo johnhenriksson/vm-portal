@@ -135,7 +135,7 @@ async def test_failed_apply_records_the_real_size(fake_vm):
 
 
 async def test_no_restart_means_no_cpu_change_on_a_running_vm(fake_vm, monkeypatch):
-    monkeypatch.setattr(vsphere, "vms_by_name", lambda fresh=False: {"web01": vsphere.VMInfo("web01", False, "poweredOn")})
+    monkeypatch.setattr(vsphere, "vms_by_name", lambda b, fresh=False: {"web01": vsphere.VMInfo("web01", False, "poweredOn")})
     status, log = await _finish(provision.resize(db.active_vm("web01"), 4, 4096, 40, restart=False))
     assert status == "failed" and "no restart was allowed" in log and "ok plan" not in log
 
@@ -152,7 +152,7 @@ def test_resize_route_permissions_and_restart_tick(fake_vm, monkeypatch):
     from app import users
     started = []
     monkeypatch.setattr(provision, "resize", lambda vm, *a, **kw: started.append((a, kw)) or 1)
-    monkeypatch.setattr(vsphere, "vms_by_name", lambda fresh=False: {"web01": vsphere.VMInfo("web01", False, "poweredOn")})
+    monkeypatch.setattr(vsphere, "vms_by_name", lambda b, fresh=False: {"web01": vsphere.VMInfo("web01", False, "poweredOn")})
     with client() as c:
         users.create("alice", "purple-otter-41", "user")
         login(c, "alice", "purple-otter-41")
@@ -194,3 +194,33 @@ def test_notes_and_owner(fake_vm):
         assert vm["owner_id"] == alice["id"] and vm["notes"] == "mine"
         actions = [r["action"] for r in db.query("SELECT action FROM audit")]
         assert "vm.owner_changed" in actions and "vm.notes_changed" in actions
+
+
+async def test_a_disk_recorded_smaller_than_it_is_is_corrected_before_planning(fake_vm):
+    """A clone gets at least its template's disk. VMs created before the portal recorded
+    that had a smaller size in their variables, and every later plan (a destroy too) tried
+    to shrink the disk, which the provider refuses."""
+    from backup_helpers import vc
+    tfvars = json.loads((fake_vm / "terraform.tfvars.json").read_text())
+    (fake_vm / "terraform.tfvars.json").write_text(json.dumps({**tfvars, "disk_gb": 20}))
+    db.execute("UPDATE vms SET disk_gb=20")
+
+    class Log:
+        text = ""
+
+        def write(self, t):
+            self.text += t
+
+        def step(self, t):
+            self.text += t + "\n"
+
+        async def run(self, *a, **kw):
+            return 0
+    log = Log()
+    await provision.prepare_workspace(fake_vm, log, vc())
+    assert json.loads((fake_vm / "terraform.tfvars.json").read_text())["disk_gb"] == 40
+    assert db.active_vm("web01")["disk_gb"] == 40 and "not 20 GB as recorded" in log.text
+    # And a create records what the clone really got.
+    (fake_vm / "terraform.tfvars.json").write_text(json.dumps({**tfvars, "disk_gb": 20}))
+    await provision.record_actual_size(fake_vm, vc(), db.active_vm("web01")["id"], log)
+    assert json.loads((fake_vm / "terraform.tfvars.json").read_text())["disk_gb"] == 40

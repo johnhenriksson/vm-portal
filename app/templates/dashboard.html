@@ -9,15 +9,15 @@
     <h1>Virtual machines</h1>
     <p class="sub">VMs cloned from your image templates.</p>
   </div>
-  <div class="actions">{% if vcenter_ready %}<a href="/vms/new" class="btn">Create VM</a>{% endif %}</div>
+  <div class="actions">{% if can_create %}<a href="/vms/new" class="btn">Create VM</a>{% endif %}</div>
 </div>
 
-{% if not vcenter_ready %}
-<div class="alert warn">vCenter isn't configured yet.
-  {% if current_user.role == "admin" %}<a href="/setup/vcenter">Run the setup wizard</a>.{% else %}Ask an admin to configure it.{% endif %}</div>
+{% if not backends_ready %}
+<div class="alert warn">No backend is set up yet: the portal needs a vCenter or a Proxmox VE cluster to create VMs on.
+  {% if current_user.role == "admin" %}<a href="{{ '/setup/backend' if not backend_count else '/settings/backends' }}">Set one up</a>.{% else %}Ask an admin to set one up.{% endif %}</div>
 {% endif %}
 
-{% if forgotten %}<div class="alert ok" role="status">This portal no longer manages <strong>{{ forgotten }}</strong>. It is still in vCenter, unchanged.</div>{% endif %}
+{% if forgotten %}<div class="alert ok" role="status">This portal no longer manages <strong>{{ forgotten }}</strong>. It is still on its backend, unchanged.</div>{% endif %}
 {% if backup_health and backup_health.state in ("failing", "late") %}
 <div class="alert warn">Scheduled backups are {{ "failing" if backup_health.state == "failing" else "behind" }}{% if backup_health.error %}: {{ backup_health.error }}{% endif %}.
   {% if backup_health.last_success %}The last good one is from {{ backup_health.last_success.strftime("%Y-%m-%d %H:%M") }} UTC.{% else %}None has succeeded yet.{% endif %}
@@ -37,7 +37,7 @@
           <td {% if loop.first %}style="border-top:0"{% endif %}>
             <div class="name-cell">{{ os_icon(g.image.manifest.os.distro if g.image else "") }}
               <div>{{ link(links.image(g.image.id if g.image else None), g.image.manifest.name if g.image else "Other templates", "title") }}
-                   <span class="meta">{{ t.name }}{% if g.templates | length > 1 %} · {{ g.templates | length }} versions{% endif %}</span></div></div>
+                   <span class="meta">{{ t.name }}{% if backend_count > 1 %} on {{ g.templates | map(attribute="backend") | unique | join(", ") }}{% endif %}{% if g.templates | length > 1 %} · {{ g.templates | length }} versions{% endif %}</span></div></div>
           </td>
           <td {% if loop.first %}style="border-top:0"{% endif %}>{{ age(t, settings.template_max_age_days) }}</td>
           <td class="right" {% if loop.first %}style="border-top:0"{% endif %}>

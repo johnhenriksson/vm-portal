@@ -9,13 +9,14 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import crypto, datalock, db, guests, images, ipam, jobs, provision, users
+from . import backends, crypto, datalock, db, feedback, guests, images, ipam, jobs, power, provision, users
 from .auth import (SESSION_MAX_AGE, LoginRequired, client_ip, csrf_field, csrf_protect, current_user,
                    end_session, require_admin, require_user, start_session)
-from .config import APP_DIR, PublicSettings, get_bootstrap, get_settings, vcenter_configured
+from .config import APP_DIR, PublicSettings, get_bootstrap, get_settings
 from .backup import schedule
 from .links import Links
-from .platforms import current as platform
+from .platforms import PLATFORMS
+from .platforms.base import usable_ipv4
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("vm-portal")
@@ -32,7 +33,9 @@ async def lifespan(app: FastAPI):
         schedule.start()
         yield
         await schedule.stop()
-        await asyncio.to_thread(platform().close)
+        await power.stop()
+        for p in PLATFORMS.values():
+            await asyncio.to_thread(p.close)
     finally:
         datalock.release()
 
@@ -111,20 +114,45 @@ async def _http_error(request: Request, exc: StarletteHTTPException):
 def render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
     s = get_settings()
     user = current_user(request)
+    try:
+        bs = backends.all_backends() if user else []
+    except Exception:  # noqa: BLE001 - e.g. a page shown during a restore; the page itself still renders
+        log.exception("could not read the backends")
+        bs = []
     base = {"settings": PublicSettings(s), "current_user": user, "links": Links(user),
-            "vcenter_ready": vcenter_configured(s), "editing_enabled": s.allow_image_editing}
+            "backends_ready": any(b.configured for b in bs), "editing_enabled": s.allow_image_editing,
+            "can_create": any(b.usable_by(user) and b.platform.CAN_PROVISION for b in bs),
+            "backend_count": len(bs)}
+    flashed = feedback.take(request)
+    base.update(flash_notice=flashed.get("notice"), flash_error=flashed.get("error"))
     return templates.TemplateResponse(request, name, {**base, **ctx}, status_code=status_code)
 
 
-async def vcenter(fn, *args, **kwargs):
-    """Call a blocking vSphere function; return (result, error message)."""
-    if not vcenter_configured():
-        return None, None  # pages show a "configure vCenter" banner instead
+async def on_backend(b, fn, *args, **kwargs):
+    """Call a blocking platform function on a backend; return (result, error message).
+    (None, None) when the backend isn't set up: pages say so instead."""
+    if b is None or not b.configured:
+        return None, None
     try:
-        return await asyncio.to_thread(fn, *args, **kwargs), None
+        return await asyncio.to_thread(fn, b, *args, **kwargs), None
     except Exception as e:  # noqa: BLE001 - shown to the user as a banner
-        log.exception("vCenter call failed")
-        return None, f"vCenter error: {e}"
+        log.exception("%s call on backend %s failed", getattr(fn, "__name__", "platform"), b.name)
+        return None, f"{b.name}: {e}"
+
+
+async def all_templates() -> tuple[list, list[str]]:
+    """The templates on every configured backend (each tagged with .backend, its backend's
+    name), and the errors of the backends that couldn't be read."""
+    bs = [b for b in backends.all_backends() if b.configured]
+    results = await asyncio.gather(*(on_backend(b, b.platform.templates) for b in bs))
+    out, errors = [], []
+    for b, (ts, err) in zip(bs, results):
+        if err:
+            errors.append(err)
+        for t in ts or []:
+            t.backend = b.name
+            out.append(t)
+    return out, errors
 
 
 def is_admin(user: dict) -> bool:
@@ -193,26 +221,40 @@ def owned_vms(user: dict) -> list[dict]:
 
 
 async def vm_rows(user: dict) -> tuple[list[dict], str | None]:
+    """The user's VMs with what their backends report; each backend is asked once, all at
+    the same time, and one that's down only affects its own VMs."""
     mine = owned_vms(user)
-    live, err = await vcenter(platform().vms_by_name) if mine else ({}, None)
+    by_backend: dict[int | None, object] = {}
+    for vm in mine:
+        b = backends.of_vm(vm)
+        by_backend.setdefault(b.id if b else None, b)
+    found = {bid: b for bid, b in by_backend.items() if b is not None}
+    results = dict(zip(found, await asyncio.gather(*(on_backend(b, b.platform.vms_by_name)
+                                                     for b in found.values()))))
     owners = {u["id"]: u["username"] for u in users.all_users()} if is_admin(user) else {}
+    errors = sorted({err for _, err in results.values() if err})
     rows = []
     for vm in mine:
+        b = backends.of_vm(vm)
+        live, err = results.get(b.id, (None, None)) if b else (None, None)
         info = (live or {}).get(vm["name"])
         rows.append({
             **vm,
             "owner": owners.get(vm["owner_id"]),
+            "backend": b.name if b else "(deleted backend)",
             "power_state": info.power_state if info else ("unknown" if err or live is None else "missing"),
-            "live_ip": (info.ip if info else None) or vm["ip"],
+            "live_ip": (info.ip if info else None) or usable_ipv4(vm["ip"]),
             "busy": jobs.is_locked(f"vm:{vm['name']}"),
+            "power_pending": (pp.label if (pp := power.running(vm["id"])) else None),
         })
-    return rows, err
+    return rows, "; ".join(errors) or None
 
 
 @app.get("/")
 async def dashboard(request: Request, user: dict = Depends(require_user)):
     vms, err = await vm_rows(user)
-    tmpls, err2 = await vcenter(platform().templates)
+    tmpls, errs = await all_templates()
+    err2 = "; ".join(e for e in errs if e not in (err or ""))
     from .routes_images import group_templates
     forgotten = request.query_params.get("forgotten", "")
     try:
@@ -232,6 +274,16 @@ async def vms_partial(request: Request, user: dict = Depends(require_user)):
 
 # --- VMs --------------------------------------------------------------------
 
+DISK_MIN_GB = 10
+
+
+def min_disk_gb(t, cfg) -> int:
+    """The smallest disk a VM cloned from template t can have: the template's own disk (a
+    clone is never smaller). When the platform didn't say, the size the image builds."""
+    known = t.disk_gb or (-(-cfg.disk_mb // 1024) if cfg else 0)
+    return max(DISK_MIN_GB, known)
+
+
 def image_choices(tmpls: list) -> list[dict]:
     """Templates grouped by image for the create-VM page, with what each image supports."""
     from .routes_images import group_templates
@@ -247,6 +299,7 @@ def image_choices(tmpls: list) -> list[dict]:
             "name": img.manifest.name if img else "Other templates",
             "distro": img.manifest.os.distro if img else "",
             "templates": g["templates"],
+            "min_disk": {t.name: min_disk_gb(t, cfg) for t in g["templates"]},
             "login_user": images.login_user(img, cfg),
             "docker": (img is None) or "docker" in img.manifest.features,
             "console_password": driver.supports_console_password,
@@ -254,18 +307,44 @@ def image_choices(tmpls: list) -> list[dict]:
     return out
 
 
-def _new_vm_form(tmpls: list) -> dict:
+def _new_vm_form(tmpls: list, b) -> dict:
     s = get_settings()
     first = image_choices(tmpls)
-    return {"cpus": s.default_cpus, "memory_mb": s.default_memory_mb, "disk_gb": s.default_disk_gb,
-            "template": first[0]["templates"][0].name if first else "", "ip_mode": "dhcp", "autostart": True}
+    template = first[0]["templates"][0].name if first else ""
+    disk = max(s.default_disk_gb, first[0]["min_disk"][template]) if first else s.default_disk_gb
+    return {"cpus": s.default_cpus, "memory_mb": s.default_memory_mb, "disk_gb": disk,
+            "template": template, "ip_mode": "dhcp", "autostart": True,
+            "backend_id": b.id if b else None}
 
 
-@app.get("/vms/new", dependencies=auth)
-async def vm_new(request: Request):
-    tmpls, err = await vcenter(platform().templates)
-    return render(request, "vm_new.html", choices=image_choices(tmpls or []), form=_new_vm_form(tmpls or []),
-                  error=err)
+def creatable(user: dict) -> list:
+    """Backends this user may create VMs on, in order."""
+    return [b for b in backends.usable(user) if b.platform.CAN_PROVISION]
+
+
+def chosen_backend(user: dict, backend_id) -> backends.Backend | None:
+    """The backend asked for, if this user may create VMs on it; else the first one they may."""
+    choices = creatable(user)
+    return next((b for b in choices if str(b.id) == str(backend_id)), None) if backend_id not in (None, "") \
+        else (choices[0] if choices else None)
+
+
+@app.get("/vms/new")
+async def vm_new(request: Request, user: dict = Depends(require_user), backend: str = ""):
+    b = chosen_backend(user, backend)
+    if b is None and backend:
+        raise HTTPException(404, "No such backend")
+    tmpls, err = await on_backend(b, b.platform.templates) if b else (None, None)
+    return render(request, "vm_new.html", choices=image_choices(tmpls or []), form=_new_vm_form(tmpls or [], b),
+                  error=err, backend=b, backend_choices=creatable(user), locations=await locations_of(b))
+
+
+async def locations_of(b) -> list[str]:
+    """Where on the backend a new VM can go (Proxmox nodes), when there's a choice."""
+    if b is None or not b.platform.LOCATION_LABEL:
+        return []
+    found, _ = await on_backend(b, b.platform.locations)
+    return found if found and len(found) > 1 else []
 
 
 @app.post("/vms")
@@ -284,22 +363,28 @@ async def vm_create(
     console_password_confirm: str = Form("", max_length=256),
     compose_yaml: str = Form("", max_length=100000),
     autostart: str = Form(""),
+    backend_id: str = Form(""),
+    location: str = Form("", max_length=64),
 ):
+    b = chosen_backend(user, backend_id)
     form = dict(name=name, template=template, cpus=cpus, memory_mb=memory_mb, disk_gb=disk_gb,
-                ip_mode=ip_mode, ip=ip, ssh_keys=ssh_keys, compose_yaml=compose_yaml, autostart=autostart == "on")
-    tmpls, tmpls_err = await vcenter(platform().templates)
+                ip_mode=ip_mode, ip=ip, ssh_keys=ssh_keys, compose_yaml=compose_yaml, autostart=autostart == "on",
+                backend_id=b.id if b else None, location=location)
+    tmpls, tmpls_err = await on_backend(b, b.platform.templates) if b else (None, None)
+    places = await locations_of(b)
 
     async def fail(msg: str):
         return render(request, "vm_new.html", status_code=400, choices=image_choices(tmpls or []), form=form,
-                      error=msg)
+                      error=msg, backend=b, backend_choices=creatable(user), locations=places)
 
-    if not vcenter_configured():
-        return await fail("vCenter is not configured yet")
+    if b is None:
+        return await fail("There's no backend you can create VMs on" if not backend_id else
+                          "You can't create VMs on that backend")
     try:
         name = provision.validate_name(name.strip())
         keys = provision.parse_ssh_keys(ssh_keys)
         compose = provision.validate_compose(compose_yaml)
-        static_ip = ipam.validate_static_ip(ip) if ip_mode == "static" else None
+        static_ip = ipam.validate_static_ip(b, ip) if ip_mode == "static" else None
         console_hash = await asyncio.to_thread(provision.hash_console_password, console_password,
                                                console_password_confirm)
     except ValueError as e:
@@ -308,13 +393,20 @@ async def vm_create(
     # Fail closed: the template list is the only thing that keeps `template` to portal
     # templates (Terraform would clone any VM by that name), so no list means no VM.
     if tmpls is None:
-        return await fail(tmpls_err or "Could not list the templates in vCenter. Try again.")
-    if template not in {t.name for t in tmpls}:
+        return await fail(tmpls_err or f"Could not list the templates on {b.name}. Try again.")
+    if location and location not in places:
+        return await fail(f"{b.name} can't put a VM on {b.platform.LOCATION_LABEL.lower() or 'location'} "
+                          f"{location!r} right now")
+    tmpl = next((t for t in tmpls if t.name == template), None)
+    if tmpl is None:
         return await fail(f"Unknown template {template!r}")
     img = images.for_template(template)
     cfg = images.config(img) if img else None
     if img and cfg and not cfg.enabled:
         return await fail("That image is disabled")
+    if disk_gb < (smallest := min_disk_gb(tmpl, cfg)):
+        return await fail(f"The disk can't be smaller than {smallest} GB: that's the size of the template's"
+                          " disk, and a clone can't shrink it")
     driver = guests.get(img.manifest.guest if img else None)
     features = tuple(img.manifest.features) if img else ("docker",)
     if compose and "docker" not in features:
@@ -327,13 +419,13 @@ async def vm_create(
         return await fail("Add at least one SSH key")
     if db.active_vm(name) or jobs.is_locked(f"vm:{name}"):
         return await fail(f"The name {name!r} is already taken")
-    exists, err = await vcenter(platform().name_exists, name)
+    exists, err = await on_backend(b, b.platform.name_exists, name)
     if err:
         return await fail(err)
     if exists:
-        return await fail(f"The name {name!r} is already taken in vCenter")
+        return await fail(f"The name {name!r} is already taken on {b.name}")
     if static_ip:
-        reason = await ipam.ipam.check(static_ip)
+        reason = await ipam.ipam.check(b, static_ip)
         if reason:
             return await fail(f"{static_ip} is in use ({reason})")
 
@@ -342,12 +434,13 @@ async def vm_create(
                               console_password_hash=console_hash, login_user=images.login_user(img, cfg),
                               guest=driver.name, features=features, image_id=img.id if img else None,
                               network_interface=img.manifest.network_interface if img and img.usable else "en*",
-                              autostart=autostart == "on")
+                              autostart=autostart == "on", backend_id=b.id, location=location or None)
     try:
         job_id = provision.create(req, owner_id=user["id"])
     except ValueError as e:
         return await fail(str(e))
-    db.audit("vm.create", name, username=user["username"], ip=client_ip(request))
+    db.audit("vm.create", f"{name} on {b.name}" + (f" ({location})" if location else ""),
+             username=user["username"], ip=client_ip(request))
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
@@ -359,18 +452,42 @@ def _vm_or_404(name: str, user: dict) -> dict:
     return vm
 
 
-@app.get("/vms/{name}")
-async def vm_detail(request: Request, name: str, user: dict = Depends(require_user)):
-    vm = _vm_or_404(name, user)
-    live, err = await vcenter(platform().vms_by_name)
-    info = (live or {}).get(name)
+def _backend_of(vm: dict) -> backends.Backend:
+    b = backends.of_vm(vm)
+    if b is None:
+        raise HTTPException(409, f"{vm['name']}'s backend no longer exists in this portal")
+    return b
+
+
+async def _live(vm: dict, fresh: bool = False):
+    """(backend, the VM as its backend reports it, error)."""
+    b = backends.of_vm(vm)
+    live, err = await on_backend(b, b.platform.vms_by_name, fresh) if b else (None, "Its backend no longer exists")
+    return b, (live or {}).get(vm["name"]), err
+
+
+def _power_view(vm: dict, info) -> dict:
+    """What the VM page shows of a power action in progress (or just over), and the
+    signature the page's status poll compares to see when to reload."""
+    p = power.get(vm["id"])
+    sig = "|".join(str(x) for x in (info.power_state if info else "none", bool(info and info.tools_running),
+                                    info.ip if info else "", p.action if p and p.running else ""))
+    return {"pending": p, "status_sig": sig}
+
+
+async def vm_page(request: Request, vm: dict, user: dict, status_code: int = 200, error: str | None = None,
+                  resize_form: dict | None = None):
+    """The VM's page; also after a refused action, with why (and what was typed)."""
+    name = vm["name"]
+    b, info, err = await _live(vm)
     # Only jobs for this VM instance (a destroyed VM may have had the same name).
     vm_jobs = db.query("SELECT * FROM jobs WHERE target=? AND kind LIKE 'vm-%' AND created_at >= ?"
                        " ORDER BY id DESC LIMIT 20", (name, vm["created_at"]))
     owner = users.get(vm["owner_id"]) if vm["owner_id"] else None
-    autostart, autostart_err = (await vcenter(platform().autostart, name, provision.vm_moid(name))
+    autostart, autostart_err = (await on_backend(b, b.platform.autostart, name, provision.vm_moid(name))
                                 if info and vm["status"] == "ready" else (None, None))
-    return render(request, "vm_detail.html", vm=vm, info=info, jobs=vm_jobs, error=err,
+    return render(request, "vm_detail.html", status_code=status_code, vm=vm, info=info, jobs=vm_jobs,
+                  error=error or err, backend=b, resize_form=resize_form, **_power_view(vm, info),
                   autostart=autostart, autostart_error=autostart_err,
                   owner=owner["username"] if owner else None, busy=jobs.is_locked(f"vm:{name}"),
                   all_users=[{"id": u["id"], "username": u["username"]} for u in users.all_users()]
@@ -380,15 +497,60 @@ async def vm_detail(request: Request, name: str, user: dict = Depends(require_us
                   if is_admin(user) else [])
 
 
+@app.get("/vms/{name}")
+async def vm_detail(request: Request, name: str, user: dict = Depends(require_user)):
+    return await vm_page(request, _vm_or_404(name, user), user)
+
+
+@app.get("/vms/{name}/status")
+async def vm_status(request: Request, name: str, user: dict = Depends(require_user), sig: str = ""):
+    """Polled by the VM page: the power action's progress; a reload (HX-Refresh) once
+    anything the page shows has changed."""
+    vm = _vm_or_404(name, user)
+    _, info, _ = await _live(vm)
+    view = _power_view(vm, info)
+    p = view["pending"]
+    if sig and sig != view["status_sig"]:
+        if p and not p.running and not p.announced:
+            p.announced = True
+            feedback.flash(request, **{"notice" if p.outcome == "done" else "error": p.message})
+        return HTMLResponse("", headers={"HX-Refresh": "true"})
+    return render(request, "_vm_status.html", vm=vm, info=info, **view)
+
+
+POWER_ACTIONS = {"on": "Power on", "off": "Power off", "shutdown": "Shut down", "reboot": "Reboot"}
+
+
 @app.post("/vms/{name}/power/{action}")
 async def vm_power(request: Request, name: str, action: str, user: dict = Depends(require_user)):
-    if action not in ("on", "off", "shutdown", "reboot"):
+    if action not in POWER_ACTIONS:
         raise HTTPException(400, "Unknown action")
-    _vm_or_404(name, user)
-    _, err = await vcenter(platform().power, name, action, provision.vm_moid(name))
+    vm = _vm_or_404(name, user)
+
+    async def refuse(status: int, msg: str):
+        return await vm_page(request, vm, user, status_code=status, error=msg)
+
+    b = backends.of_vm(vm)
+    if b is None:
+        return await refuse(409, f"{name}'s backend no longer exists in this portal")
+    if jobs.is_locked(f"vm:{name}"):
+        return await refuse(409, "A job is running for this VM. Try again when it's done")
+    busy = power.running(vm["id"])
+    if busy and action != "off":           # a hard power off is always allowed: it's the way out
+        return await refuse(409, f"{busy.label} is already in progress ({busy.elapsed}s so far)")
+    live, err = await on_backend(b, b.platform.vms_by_name, True)
+    info = (live or {}).get(name)
     if err:
-        raise HTTPException(502, err)
+        return await refuse(502, err)
+    if action in ("shutdown", "reboot") and info and b.platform.GUEST_POWER_NEEDS_TOOLS and not info.tools_running:
+        return await refuse(409, f"The guest tools in {name} aren't answering, so it can't be asked to"
+                                 f" {POWER_ACTIONS[action].lower()}. Use Power off (hard) instead")
+    _, err = await on_backend(b, b.platform.power, name, action, provision.vm_moid(name))
+    if err:
+        return await refuse(502, err)
     db.audit(f"vm.power.{action}", name, username=user["username"], ip=client_ip(request))
+    if power.start(vm, action, user["username"], info) is None:
+        return feedback.redirect(request, f"/vms/{name}", notice=power.DONE.get(action))
     return RedirectResponse(f"/vms/{name}", status_code=303)
 
 
@@ -403,24 +565,33 @@ async def vm_resize(
     restart: str = Form(""),
 ):
     vm = _vm_or_404(name, user)
+
+    async def refuse(status: int, msg: str):
+        return await vm_page(request, vm, user, status_code=status, error=msg,
+                             resize_form={"cpus": cpus, "memory_mb": memory_mb, "disk_gb": disk_gb,
+                                          "restart": restart == "on"})
+
     if vm["status"] != "ready":
-        raise HTTPException(409, "Only a ready VM can be resized")
+        return await refuse(409, "Only a ready VM can be resized")
     if jobs.is_locked(f"vm:{name}"):
-        raise HTTPException(409, "A job is already running for this VM")
+        return await refuse(409, "A job is already running for this VM")
+    if busy := power.running(vm["id"]):
+        return await refuse(409, f"{busy.label} is in progress. Resize when it's done")
     if memory_mb % 4:
-        raise HTTPException(400, "Memory must be a multiple of 4 MB")
+        return await refuse(400, "Memory must be a multiple of 4 MB")
     if (cpus, memory_mb, disk_gb) == (vm["cpus"], vm["memory_mb"], vm["disk_gb"]):
-        return RedirectResponse(f"/vms/{name}", status_code=303)
+        return feedback.redirect(request, f"/vms/{name}", notice="Nothing to change: those are the VM's sizes now.")
     needs_off = (cpus, memory_mb) != (vm["cpus"], vm["memory_mb"])
     if needs_off and restart != "on":
-        live, err = await vcenter(platform().vms_by_name, True)
+        b = _backend_of(vm)
+        live, err = await on_backend(b, b.platform.vms_by_name, True)
         info = (live or {}).get(name)
         if err or not info or info.power_state != "poweredOff":
-            raise HTTPException(400, "Changing vCPUs or memory restarts the VM: tick 'Restart the VM'")
+            return await refuse(400, "Changing vCPUs or memory restarts the VM: tick 'Restart the VM'")
     try:
         job_id = provision.resize(vm, cpus, memory_mb, disk_gb, restart=restart == "on", user_id=user["id"])
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        return await refuse(400, str(e))
     db.audit("vm.resize", f"{name}: {vm['cpus']}->{cpus} vCPU, {vm['memory_mb']}->{memory_mb} MB,"
              f" {vm['disk_gb']}->{disk_gb} GB", username=user["username"], ip=client_ip(request))
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
@@ -429,16 +600,16 @@ async def vm_resize(
 @app.post("/vms/{name}/details")
 async def vm_details(request: Request, name: str, user: dict = Depends(require_user),
                      notes: str = Form("", max_length=2000), owner_id: str = Form("")):
-    """Portal-only details: notes (owner or admin), owner (admin). Nothing changes in vCenter."""
+    """Portal-only details: notes (owner or admin), owner (admin). Nothing changes on the backend."""
     vm = _vm_or_404(name, user)
     notes = notes.replace("\r\n", "\n").strip()
     if any(ord(c) < 32 and c not in "\n\t" for c in notes):
-        raise HTTPException(400, "Notes can't contain control characters")
+        return await vm_page(request, vm, user, 400, "Notes can't contain control characters")
     new_owner = vm["owner_id"]
     if owner_id and is_admin(user):
         target = users.get(int(owner_id)) if owner_id.isdigit() else None
         if target is None:
-            raise HTTPException(400, "Unknown user")
+            return await vm_page(request, vm, user, 400, "Unknown user")
         new_owner = target["id"]
     db.execute("UPDATE vms SET notes=?, owner_id=? WHERE id=?", (notes, new_owner, vm["id"]))
     if new_owner != vm["owner_id"]:
@@ -447,34 +618,67 @@ async def vm_details(request: Request, name: str, user: dict = Depends(require_u
                  username=user["username"], ip=client_ip(request))
     if notes != (vm["notes"] or ""):
         db.audit("vm.notes_changed", name, username=user["username"], ip=client_ip(request))
+    changed = [w for w, c in (("notes", notes != (vm["notes"] or "")), ("owner", new_owner != vm["owner_id"])) if c]
+    msg = f"Saved the {' and '.join(changed)}." if changed else "Nothing changed."
     # The previous owner may no longer see the VM.
-    return RedirectResponse(f"/vms/{name}" if new_owner == user["id"] or is_admin(user) else "/", status_code=303)
+    return feedback.redirect(request, f"/vms/{name}" if new_owner == user["id"] or is_admin(user) else "/",
+                             notice=msg)
 
 
 @app.post("/vms/{name}/autostart")
 async def vm_autostart(request: Request, name: str, user: dict = Depends(require_user), enabled: str = Form("")):
-    """Start the VM with its host, or not: its entry in the host's startup list in vCenter."""
+    """Start the VM with its host, or not: on vSphere its entry in the host's startup list, on
+    Proxmox the VM's own start-at-boot option."""
     vm = _vm_or_404(name, user)
     if vm["status"] != "ready":
-        raise HTTPException(409, "Only a ready VM's autostart can be changed")
+        return await vm_page(request, vm, user, 409, "Only a ready VM's autostart can be changed")
     if jobs.is_locked(f"vm:{name}"):
-        raise HTTPException(409, "A job is already running for this VM")
+        return await vm_page(request, vm, user, 409, "A job is already running for this VM")
     on = enabled == "on"
-    done, err = await vcenter(platform().set_autostart, name, provision.vm_moid(name), on)
+    b = _backend_of(vm)
+    done, err = await on_backend(b, b.platform.set_autostart, name, provision.vm_moid(name), on)
     if done is None:
-        raise HTTPException(502, err or "vCenter is not configured")
+        return await vm_page(request, vm, user, 502, err or f"{b.name} is not configured")
     db.execute("UPDATE vms SET autostart=? WHERE id=?", (int(on), vm["id"]))
     db.audit(f"vm.autostart.{'on' if on else 'off'}", name, username=user["username"], ip=client_ip(request))
-    return RedirectResponse(f"/vms/{name}", status_code=303)
+    return feedback.redirect(request, f"/vms/{name}", notice=f"Autostart is {'on' if on else 'off'}: {name} "
+                             f"{'starts' if on else 'no longer starts'} with host {done.host}.")
+
+
+@app.post("/vms/{name}/seed-cleanup")
+async def vm_seed_cleanup(request: Request, name: str, user: dict = Depends(require_user)):
+    """Proxmox: replace the VM's first-boot seed ISO (keys, console password hash, compose
+    file) by a copy without them, once the VM is up. The create job does this itself; this
+    is for when the VM's guest agent didn't answer in time."""
+    vm = _vm_or_404(name, user)
+    b = _backend_of(vm)
+    clean = getattr(b.platform, "clean_seed", None)
+    if clean is None or not vm["seed_pending"]:
+        return await vm_page(request, vm, user, 400, "Nothing to clean up")
+    if jobs.is_locked(f"vm:{name}"):
+        return await vm_page(request, vm, user, 409, "A job is already running for this VM")
+    done, err = await on_backend(b, clean, name, provision.vm_moid(name), 20)
+    if err:
+        return await vm_page(request, vm, user, 502, err)
+    if not done:
+        return await vm_page(request, vm, user, 409, "The VM's guest agent doesn't answer yet. Start the VM, "
+                                                     "wait for it to boot, then try again")
+    db.audit("vm.seed_cleaned", name, username=user["username"], ip=client_ip(request))
+    return feedback.redirect(request, f"/vms/{name}", notice="The seed ISO was replaced by a copy without the "
+                                                             "keys, password hash and compose file.")
 
 
 @app.post("/vms/{name}/destroy")
 async def vm_destroy(request: Request, name: str, confirm: str = Form(""), user: dict = Depends(require_user)):
     vm = _vm_or_404(name, user)
     if confirm != name:
-        raise HTTPException(400, "Type the VM name to confirm")
+        return await vm_page(request, vm, user, 400, f"Type the VM name ({name}) to confirm destroying it")
     if jobs.is_locked(f"vm:{name}"):
-        raise HTTPException(409, "A job is already running for this VM")
+        return await vm_page(request, vm, user, 409, "A job is already running for this VM")
+    if busy := power.running(vm["id"]):
+        return await vm_page(request, vm, user, 409, f"{busy.label} is in progress. Destroy it when that's done,"
+                                                     " or power it off (hard) first")
+    _backend_of(vm)
     job_id = provision.destroy(vm, user_id=user["id"])
     db.audit("vm.destroy", name, username=user["username"], ip=client_ip(request))
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
@@ -482,10 +686,14 @@ async def vm_destroy(request: Request, name: str, confirm: str = Form(""), user:
 
 # --- IPs --------------------------------------------------------------------
 
-@app.get("/ip/suggest", dependencies=auth)
-async def ip_suggest(request: Request, fresh: bool = False):
+@app.get("/ip/suggest")
+async def ip_suggest(request: Request, user: dict = Depends(require_user), fresh: bool = False,
+                     backend: str = ""):
+    b = chosen_backend(user, backend)
+    if b is None:
+        return render(request, "_ip_suggest.html", error="Choose a backend first")
     try:
-        result = await ipam.ipam.scan(fresh=fresh)
+        result = await ipam.ipam.scan(b, fresh=fresh)
     except ipam.PoolNotConfigured as e:
         return render(request, "_ip_suggest.html", error=str(e))
     except Exception as e:  # noqa: BLE001
@@ -516,7 +724,25 @@ async def job_list(request: Request, user: dict = Depends(require_user)):
 
 @app.get("/jobs/{job_id}")
 async def job_detail(request: Request, job_id: int, user: dict = Depends(require_user)):
-    return render(request, "job.html", job=_job_or_404(job_id, user))
+    job = _job_or_404(job_id, user)
+    return render(request, "job.html", job=job, cancelling=jobs.cancelling(job_id),
+                  can_cancel=is_admin(user) and job["kind"] in CANCELLABLE and job["status"] in ("queued", "running"))
+
+
+# Only template builds: Packer cleans up after itself when stopped. Stopping tofu halfway
+# through a VM would leave one that's half made.
+CANCELLABLE = ("packer-build",)
+
+
+@app.post("/jobs/{job_id}/cancel")
+async def job_cancel(request: Request, job_id: int, user: dict = Depends(require_admin)):
+    job = _job_or_404(job_id, user)
+    if job["kind"] not in CANCELLABLE:
+        raise HTTPException(400, "This kind of job can't be cancelled")
+    if jobs.cancel(job_id, by=user["username"]):
+        db.audit("job.cancelled", f"#{job_id} {job['kind']} {job['target']}", username=user["username"],
+                 ip=client_ip(request))
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 @app.get("/jobs/{job_id}/stream")
@@ -533,7 +759,9 @@ async def job_stream(job_id: int, user: dict = Depends(require_user)):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-from . import admin, console, editor, routes_backup, routes_images  # noqa: E402 - feature routers
+from . import admin, console, editor, routes_backends, routes_backup, routes_images  # noqa: E402 - feature routers
 
-for _r in (admin.router, console.router, routes_images.router, editor.router, routes_backup.router):
+# routes_backends first: admin's /settings/{section} would otherwise take /settings/backends.
+for _r in (routes_backends.router, admin.router, console.router, routes_images.router, editor.router,
+           routes_backup.router):
     app.include_router(_r)
