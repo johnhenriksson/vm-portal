@@ -13,7 +13,7 @@ from app.platforms import base
 
 APP = Path(platforms.__file__).resolve().parents[1]
 MEMBERS = {**{n: None for n in base.Platform.__annotations__},
-           **{n: f for n, f in vars(base.Platform).items() if inspect.isfunction(f)}}
+           **{n: f for n, f in vars(base.Platform).items() if inspect.isfunction(f) and not n.startswith("__")}}
 
 
 def backend(kind: str):
