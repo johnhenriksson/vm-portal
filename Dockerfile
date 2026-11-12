@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # --- tools: download and verify OpenTofu, Packer, the providers and plugins ---------------
-FROM python:3.12-slim-bookworm AS tools
+FROM python:3.15-slim-bookworm AS tools
 
 ARG TOFU_VERSION=1.13.8
 ARG PACKER_VERSION=1.16.2
@@ -54,7 +54,7 @@ RUN set -eux; \
 
 
 # --- runtime --------------------------------------------------------------------------------
-FROM python:3.12-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates fping iputils-ping xorriso openssh-client \
