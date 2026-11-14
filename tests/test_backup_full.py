@@ -72,7 +72,8 @@ def test_environment_secrets_never_go_into_a_backup():
 
 def test_full_round_trip_on_the_same_installation(keypair):
     populate()
-    db.execute("UPDATE vms SET autostart=0")
+    db.execute("UPDATE vms SET autostart=0, firstboot_state='failed', firstboot_since=created_at,"
+               " firstboot_detail=?", ('{"errors": ["boom"], "log": "a\\nb"}',))
     inst = collect.installation_id()
     data, _ = full_backup([keypair[1]])
     # Things change after the backup...
@@ -90,6 +91,8 @@ def test_full_round_trip_on_the_same_installation(keypair):
 
     assert users.by_name("alice") and db.active_vm("web-01")["notes"] == "hi"
     assert db.active_vm("web-01")["autostart"] == 0
+    assert db.active_vm("web-01")["firstboot_state"] == "failed"
+    assert json.loads(db.active_vm("web-01")["firstboot_detail"])["log"] == "a\nb"
     config.get_settings.cache_clear()
     s = config.get_settings()
     assert s.default_cpus == 4 and backends.stored_rows()[0]["secrets"] == {"vsphere_password": "stored-secret"}

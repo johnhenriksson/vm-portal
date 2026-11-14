@@ -11,7 +11,7 @@ from pathlib import Path
 import bcrypt
 import yaml
 
-from . import backends, config, db, guests, jobs
+from . import backends, config, db, firstboot, guests, jobs
 from .config import get_settings
 from .platforms import PLATFORMS, for_state
 from .platforms.base import CREATED_BY, usable_ipv4
@@ -212,6 +212,9 @@ def create(req: VMRequest, owner_id: int | None = None) -> int:
         on_failure=lambda: db.execute("UPDATE vms SET status='failed' WHERE id=?", (vm_id,)),
     )
     db.execute("UPDATE vms SET last_job_id=? WHERE id=?", (job_id, vm_id))
+    if req.guest == "cloud-init" and firstboot.tracked(pf):
+        db.execute("UPDATE vms SET firstboot_state='waiting', firstboot_since=? WHERE id=?", (db.now(), vm_id))
+        firstboot.ensure_watching()
     return job_id
 
 

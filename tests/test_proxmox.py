@@ -664,3 +664,65 @@ def test_placement_dropdowns_explain_themselves(b):
     unchosen = {f["key"]: f for f in proxmox_placement(b, {**inv, "nodes": inv["nodes"] * 1 + [
         {"name": "pve2", "online": True, "storages": [], "bridges": []}]}, chosen | {"proxmox_node": ""})}
     assert unchosen["proxmox_storage"]["empty"] == "Choose a node first" and not unchosen["proxmox_storage"]["hint"]
+
+
+# --- whether first-boot setup worked -------------------------------------------------------
+
+FAILED = json.dumps({"v1": {"datasource": "DataSourceNoCloud", "errors": [
+    "('scripts-user', RuntimeError('Runparts: 1 failures (runcmd) in 1 attempted commands'))"]}})
+READ = "GET /nodes/pve1/qemu/101/agent/file-read?file="
+
+
+def test_first_boot_reads_cloud_inits_result_through_the_agent(b, pve):
+    from app import firstboot
+    assert proxmox.first_boot(b, "web-01", "101") is None              # no file (yet): the fake answers 500
+    pve.api[READ + firstboot.RESULT_PATH] = {"content": json.dumps({"v1": {"errors": []}})}
+    assert proxmox.first_boot(b, "web-01", "101") == firstboot.Result(ok=True)
+    pve.api[READ + firstboot.RESULT_PATH] = {"content": FAILED}
+    pve.api[READ + firstboot.OUTPUT_LOG] = {"content": "".join(f"line {i}\n" for i in range(100)) +
+                                            "env file /opt/app/docker-compose.env not found\x1b[0m\n"}
+    r = proxmox.first_boot(b, "web-01", "101")
+    assert not r.ok and "runcmd" in r.errors[0]
+    lines = r.log.splitlines()
+    assert len(lines) == firstboot.LOG_LINES and lines[0] == "line 81"
+    assert lines[-1] == "env file /opt/app/docker-compose.env not found?[0m"   # no terminal escapes
+
+
+def test_first_boot_without_the_file_read_privilege(b, monkeypatch):
+    from app import firstboot
+
+    real = proxmox._get
+
+    def refused(b, *parts, **kw):
+        if "file-read" in parts:
+            raise proxmox.ApiError(403, "Proxmox answered 403: Permission check failed")
+        return real(b, *parts, **kw)
+    monkeypatch.setattr(proxmox, "_get", refused)
+    with pytest.raises(firstboot.Unreadable, match="VM.GuestAgent.FileRead"):
+        proxmox.first_boot(b, "web-01", "101")
+
+
+def test_file_read_privilege_is_asked_for_on_proxmox_9_only():
+    nine = list(proxmox.PRIVILEGES) + ["VM.GuestAgent.Audit"]
+    assert proxmox.missing_privileges(nine) == ["VM.GuestAgent.FileRead (to show whether a VM's first boot worked)"]
+    assert proxmox.missing_privileges(nine + ["VM.GuestAgent.FileRead"]) == []
+    assert proxmox.missing_privileges(nine + ["VM.GuestAgent.Unrestricted"]) == []
+    assert proxmox.missing_privileges(list(proxmox.PRIVILEGES) + ["VM.Monitor"]) == []   # 8
+
+
+def test_vm_page_shows_a_failed_first_boot(b, pve, monkeypatch):
+    from app import firstboot
+    db.execute("INSERT INTO vms (name, status, template, cpus, memory_mb, disk_gb, ip_mode, created_at, backend_id,"
+               " has_compose, firstboot_state, firstboot_since) VALUES ('web-01', 'ready', 't', 1, 1024, 10,"
+               " 'dhcp', ?, ?, 1, 'waiting', ?)", (db.now(), b.id, db.now()))
+    monkeypatch.setattr(provision, "vm_moid", lambda name: "101")
+    pve.api[READ + firstboot.RESULT_PATH] = {"content": FAILED}
+    pve.api[READ + firstboot.OUTPUT_LOG] = {"content": "pulling\nenv file <x> not found\n"}
+    asyncio.run(firstboot.tick())
+    vm = db.active_vm("web-01")
+    assert vm["firstboot_state"] == "failed"
+    with client() as c:
+        login(c)
+        page = c.get("/vms/web-01").text
+    assert "First-boot setup failed" in page and "compose app may not be running" in page
+    assert "Runparts: 1 failures (runcmd)" in page and "env file &lt;x&gt; not found" in page   # escaped

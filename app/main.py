@@ -9,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import backends, crypto, datalock, db, feedback, guests, images, ipam, jobs, power, provision, users
+from . import backends, crypto, datalock, db, feedback, firstboot, guests, images, ipam, jobs, power, provision, users
 from .auth import (SESSION_MAX_AGE, LoginRequired, client_ip, csrf_field, csrf_protect, current_user,
                    end_session, require_admin, require_user, start_session)
 from .config import APP_DIR, PublicSettings, get_bootstrap, get_settings
@@ -31,9 +31,11 @@ async def lifespan(app: FastAPI):
         users.ensure_bootstrap()
         images.migrate_legacy()
         schedule.start()
+        firstboot.ensure_watching()
         yield
         await schedule.stop()
         await power.stop()
+        await firstboot.stop()
         for p in PLATFORMS.values():
             await asyncio.to_thread(p.close)
     finally:
@@ -471,7 +473,8 @@ def _power_view(vm: dict, info) -> dict:
     signature the page's status poll compares to see when to reload."""
     p = power.get(vm["id"])
     sig = "|".join(str(x) for x in (info.power_state if info else "none", bool(info and info.tools_running),
-                                    info.ip if info else "", p.action if p and p.running else ""))
+                                    info.ip if info else "", p.action if p and p.running else "",
+                                    vm.get("firstboot_state") or ""))
     return {"pending": p, "status_sig": sig}
 
 
@@ -488,6 +491,7 @@ async def vm_page(request: Request, vm: dict, user: dict, status_code: int = 200
                                 if info and vm["status"] == "ready" else (None, None))
     return render(request, "vm_detail.html", status_code=status_code, vm=vm, info=info, jobs=vm_jobs,
                   error=error or err, backend=b, resize_form=resize_form, **_power_view(vm, info),
+                  firstboot=firstboot.detail(vm),
                   autostart=autostart, autostart_error=autostart_err,
                   owner=owner["username"] if owner else None, busy=jobs.is_locked(f"vm:{name}"),
                   all_users=[{"id": u["id"], "username": u["username"]} for u in users.all_users()]
@@ -666,6 +670,29 @@ async def vm_seed_cleanup(request: Request, name: str, user: dict = Depends(requ
     db.audit("vm.seed_cleaned", name, username=user["username"], ip=client_ip(request))
     return feedback.redirect(request, f"/vms/{name}", notice="The seed ISO was replaced by a copy without the "
                                                              "keys, password hash and compose file.")
+
+
+@app.post("/vms/{name}/firstboot-check")
+async def vm_firstboot_check(request: Request, name: str, user: dict = Depends(require_user)):
+    """Ask again whether the VM's first-boot setup worked (after the portal gave up waiting,
+    or once a missing permission is given)."""
+    vm = _vm_or_404(name, user)
+    b = _backend_of(vm)
+    if vm["status"] != "ready" or not vm["firstboot_state"] or not firstboot.tracked(b.platform):
+        return await vm_page(request, vm, user, 400, "Nothing to check")
+    if not b.configured:
+        return await vm_page(request, vm, user, 409, f"{b.name} is not configured")
+    try:
+        # From now, so a VM the portal already gave up on isn't given up on again at once.
+        state = await asyncio.to_thread(firstboot.check, vm | {"firstboot_since": db.now()})
+    except Exception as e:  # noqa: BLE001 - shown as a banner
+        log.exception("first-boot check of %s failed", name)
+        return await vm_page(request, vm, user, 502, f"{b.name}: {e}")
+    if state == "waiting":
+        firstboot.restart_watch(vm["id"])
+        return feedback.redirect(request, f"/vms/{name}", notice="No result from cloud-init yet. The portal "
+                                                                 "keeps checking and updates this page.")
+    return feedback.redirect(request, f"/vms/{name}")
 
 
 @app.post("/vms/{name}/destroy")

@@ -464,6 +464,7 @@ PRIVILEGES = ("VM.Allocate", "VM.Clone", "VM.Audit", "VM.Config.CDROM", "VM.Conf
               "VM.Console", "Datastore.Audit", "Datastore.AllocateSpace", "Datastore.AllocateTemplate",
               "Datastore.Allocate", "SDN.Use", "Sys.Audit")
 AGENT_PRIVILEGES = ("VM.GuestAgent.Audit", "VM.Monitor")
+FILE_READ_PRIVILEGES = ("VM.GuestAgent.FileRead", "VM.GuestAgent.Unrestricted")
 
 
 def missing_privileges(privileges: list[str] | None) -> list[str]:
@@ -474,6 +475,9 @@ def missing_privileges(privileges: list[str] | None) -> list[str]:
     missing = [p for p in PRIVILEGES if p not in privileges]
     if not any(p in privileges for p in AGENT_PRIVILEGES):
         missing.append("VM.GuestAgent.Audit (Proxmox VE 9) or VM.Monitor (8)")
+    if "VM.GuestAgent.Audit" in privileges and not any(p in privileges for p in FILE_READ_PRIVILEGES):
+        # Proxmox VE 9 split the guest agent's privileges; reading a file is its own.
+        missing.append("VM.GuestAgent.FileRead (to show whether a VM's first boot worked)")
     return missing
 
 
@@ -709,6 +713,33 @@ def clean_seed(b, name: str, vm_id: str | None, wait: int = AGENT_WAIT) -> bool:
     delete_iso(b, f"{b.cfg.proxmox_iso_storage}:iso/{first}", row["node"])
     db.execute("UPDATE vms SET seed_pending=0 WHERE name=? AND status NOT IN ('destroyed', 'forgotten')", (name,))
     return True
+
+
+def _agent_read(b, row, path: str) -> str | None:
+    """A file in the guest, through its guest agent (None: no agent yet, or no such file)."""
+    try:
+        data = _get(b, "nodes", row["node"], "qemu", row["vmid"], "agent", "file-read", file=path) or {}
+    except ApiError as e:
+        if e.status == 403:
+            from ..firstboot import Unreadable
+            raise Unreadable("The portal's API token may not read files through the guest agent: give it "
+                             "VM.GuestAgent.FileRead (Proxmox VE 9) or VM.Monitor (8).") from None
+        return None     # the agent isn't up, or cloud-init hasn't written the file yet
+    content = data.get("content") if isinstance(data, dict) else None
+    return content if isinstance(content, str) else None
+
+
+def first_boot(b, name: str, vm_id: str | None):
+    """cloud-init's outcome on the VM (firstboot.Result), or None while there is none yet."""
+    from .. import firstboot
+    row = _find_vm(b, name, vm_id)
+    text = _agent_read(b, row, firstboot.RESULT_PATH)
+    if text is None:
+        return None
+    r = firstboot.parse_result(text)
+    if not r.ok:
+        r.log = firstboot.tail(_agent_read(b, row, firstboot.OUTPUT_LOG) or "")
+    return r
 
 
 async def after_create(b, req, vm_id: str | None, log) -> None:

@@ -100,6 +100,11 @@ MIGRATIONS = [
     # Proxmox: the first-boot seed ISO still holds the VM's secrets (it's replaced by a
     # cleaned copy once the VM has booted).
     ("vms", "seed_pending", "INTEGER NOT NULL DEFAULT 0"),
+    # Whether first-boot setup worked (firstboot.py): state, its details as JSON, and when
+    # watching for it started.
+    ("vms", "firstboot_state", "TEXT"),
+    ("vms", "firstboot_detail", "TEXT"),
+    ("vms", "firstboot_since", "TEXT"),
 ]
 
 # Settings that were global before backends existed, and become the first backend.

@@ -152,6 +152,10 @@ class VmRow(_Row):
     autostart: int | None = Field(None, ge=0, le=1)   # None: not managed (and backups from before it)
     backend_id: int | None = Field(None, ge=1)        # full backups; None: from before backends existed
     seed_pending: int = Field(0, ge=0, le=1)
+    # Whether first-boot setup worked (app/firstboot.py); None in backups from before it.
+    firstboot_state: Literal["waiting", "done", "failed", "unknown"] | None = None
+    firstboot_detail: str | None = Field(None, max_length=32000)
+    firstboot_since: str | None = None
     owner_username: str | None = None   # only in VM backups: ids mean nothing on another portal
     backend_name: str | None = Field(None, max_length=64)    # only in VM backups, like the owner
     backend_type: str | None = Field(None, max_length=32)
@@ -173,10 +177,17 @@ class VmRow(_Row):
     def _ip(cls, v):
         return str(ipaddress.IPv4Address(v)) if v is not None else v
 
-    @field_validator("created_at")
+    @field_validator("created_at", "firstboot_since")
     @classmethod
     def _ts(cls, v):
         return _timestamp(v)
+
+    @field_validator("firstboot_detail")
+    @classmethod
+    def _firstboot_detail(cls, v):
+        if v is not None and not isinstance(json.loads(v), dict):
+            raise ValueError("invalid first-boot details")
+        return v
 
     @field_validator("vm_user")
     @classmethod

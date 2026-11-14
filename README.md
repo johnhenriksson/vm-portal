@@ -230,7 +230,10 @@ and more nodes (`PROXMOX_NODES`, comma separated).
   - **VM**: `VM.Allocate`, `VM.Clone`, `VM.Audit`, `VM.Config.CDROM`, `VM.Config.CPU`,
     `VM.Config.Disk`, `VM.Config.HWType`, `VM.Config.Memory`, `VM.Config.Network`,
     `VM.Config.Options`, `VM.PowerMgmt`, `VM.Console`, and for the guest agent
-    `VM.GuestAgent.Audit` (Proxmox VE 9) or `VM.Monitor` (8)
+    `VM.GuestAgent.Audit` and `VM.GuestAgent.FileRead` (Proxmox VE 9) or `VM.Monitor`
+    (8). FileRead lets the portal read cloud-init's result, to show on the VM page
+    whether first-boot setup worked (the compose app among it); without it that
+    shows as unknown
   - **Storage**: `Datastore.Audit` and `Datastore.AllocateSpace` on the VM disk
     storage; on the ISO storage also `Datastore.AllocateTemplate` (uploading ISOs)
     and `Datastore.Allocate` (deleting the portal's seed ISOs). Keep the ISO
@@ -241,11 +244,11 @@ and more nodes (`PROXMOX_NODES`, comma separated).
   Template builds need the same.
 
   The quick way, in a shell on a node (Proxmox VE 9; on 8 write `VM.Monitor`
-  instead of `VM.GuestAgent.Audit`):
+  instead of `VM.GuestAgent.Audit VM.GuestAgent.FileRead`):
 
   ```sh
   pveum user add vmportal@pve
-  pveum role add VMPortal -privs "VM.Allocate VM.Clone VM.Audit VM.Config.CDROM VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.PowerMgmt VM.Console VM.GuestAgent.Audit Datastore.Audit Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Allocate SDN.Use Sys.Audit"
+  pveum role add VMPortal -privs "VM.Allocate VM.Clone VM.Audit VM.Config.CDROM VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.PowerMgmt VM.Console VM.GuestAgent.Audit VM.GuestAgent.FileRead Datastore.Audit Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Allocate SDN.Use Sys.Audit"
   pveum acl modify / -user vmportal@pve -role VMPortal
   pveum user token add vmportal@pve vmportal        # prints the secret, once
   pveum acl modify / -token 'vmportal@pve!vmportal' -role VMPortal

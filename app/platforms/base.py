@@ -212,3 +212,9 @@ class Platform(Protocol):
     def import_problems(self, b, vm_id: str, name: str, tfvars: dict) -> list[str]:
         """Reasons not to import a VM from a backup: the id must belong to that very VM,
         inside this backend's part of the platform, created by vm-portal. Empty = fine."""
+
+    # Optional, found with getattr (a platform without it isn't asked):
+    #   clean_seed(b, name, vm_id, wait) -> bool      replace a first-boot seed without secrets
+    #   first_boot(b, name, vm_id) -> firstboot.Result | None
+    #       cloud-init's outcome on the VM, None while there is none yet; raises
+    #       firstboot.Unreadable if the backend can't read it at all (a permission)

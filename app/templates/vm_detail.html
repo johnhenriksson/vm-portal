@@ -59,6 +59,23 @@
     <button class="btn-outline btn-sm">Clean up</button></form>{% endif %}
 </div>
 {% endif %}
+{% set fb = vm.firstboot_state %}
+{% if fb == "failed" %}
+<div class="alert" role="alert">
+  <strong>First-boot setup failed.</strong> cloud-init reported
+  {{ "an error" if firstboot.errors | length == 1 else "errors" }} on {{ vm.name }}{% if vm.has_compose %}, so the
+  compose app may not be running{% endif %}:
+  <ul>{% for e in firstboot.errors %}<li class="mono">{{ e }}</li>{% endfor %}</ul>
+  {% if firstboot.log %}<details style="margin-top:.5rem"><summary>Last lines of /var/log/cloud-init-output.log</summary>
+    <pre class="check">{{ firstboot.log }}</pre></details>{% endif %}
+</div>
+{% elif fb == "unknown" and vm.status == "ready" %}
+<div class="alert warn row" style="justify-content:space-between">
+  <span>The portal couldn't tell whether first-boot setup worked. {{ firstboot.reason }}</span>
+  {% if not busy %}<form method="post" action="/vms/{{ vm.name }}/firstboot-check">{{ csrf_field(request) }}
+    <button class="btn-outline btn-sm">Check again</button></form>{% endif %}
+</div>
+{% endif %}
 {% if autostart and vm.autostart is not none and autostart.enabled != autostart_wanted %}
 <div class="alert warn row" style="justify-content:space-between">
   <span>Autostart should be {{ "on" if autostart_wanted else "off" }}, but host {{ autostart.host }} has it
@@ -90,6 +107,11 @@
           {%- if autostart.enabled and not autostart.host_enabled %}<br><span class="error">Host {{ autostart.host }} has autostart turned off</span>{% endif %}
           {%- elif autostart_error %}<span class="muted" title="{{ autostart_error }}">Unknown</span>{% else %}–{% endif %}</dd>
         <dt>Compose app</dt><dd>{{ "Yes, /opt/app/compose.yaml" if vm.has_compose else "No" }}</dd>
+        {% if fb %}<dt>First boot</dt><dd>
+          {%- if fb == "waiting" %}{% if vm.status == "ready" %}<span aria-busy="true"></span>Setting up…{% else %}–{% endif %}
+          {%- elif fb == "done" %}Finished without errors
+          {%- elif fb == "failed" %}<span class="error">Failed</span>
+          {%- else %}<span class="muted">Unknown</span>{% endif %}</dd>{% endif %}
         {% if vm.notes %}<dt>Notes</dt><dd class="notes">{{ vm.notes }}</dd>{% endif %}
       </dl>
     </div>
