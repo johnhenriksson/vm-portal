@@ -90,7 +90,29 @@ def validate_compose(text: str) -> str:
         raise ValueError(f"compose.yaml is not valid YAML: {e}") from None
     if not isinstance(doc, dict) or "services" not in doc:
         raise ValueError("compose.yaml must have a top-level 'services' key")
+    services = doc["services"] if isinstance(doc["services"], dict) else {}
+    for name, svc in services.items():
+        if isinstance(svc, dict) and (missing := _required_env_files(svc.get("env_file"))):
+            # Only compose.yaml is written to the VM, so `docker compose up` would stop at
+            # "env file ... not found" on first boot and nothing would start.
+            raise ValueError(
+                f"Service '{name}' reads env_file {', '.join(missing)}, but only compose.yaml is "
+                "copied to the VM. Move those variables under the service's 'environment:' key, "
+                "or mark the file 'required: false'.")
     return text + "\n"
+
+
+def _required_env_files(env_file) -> list[str]:
+    """The env files a service's env_file entry needs to exist (compose accepts a string,
+    a list of strings, or a list of {path, required} mappings)."""
+    entries = env_file if isinstance(env_file, list) else [env_file] if env_file else []
+    out = []
+    for e in entries:
+        if isinstance(e, str):
+            out.append(e)
+        elif isinstance(e, dict) and e.get("required", True) is not False and e.get("path"):
+            out.append(str(e["path"]))
+    return out
 
 
 def render_metadata(req: VMRequest) -> str:

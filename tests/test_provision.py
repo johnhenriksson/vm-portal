@@ -44,6 +44,20 @@ def test_compose_validation():
         provision.validate_compose("services: [")
 
 
+@pytest.mark.parametrize("env_file", ["docker-compose.env", "[a.env]", "[{path: a.env}]",
+                                      "[{path: a.env, required: true}]"])
+def test_compose_rejects_env_file_the_vm_will_not_have(env_file):
+    # The upstream paperless-ngx compose file reads docker-compose.env; only compose.yaml
+    # reaches the VM, so first boot failed with "env file ... not found".
+    with pytest.raises(ValueError, match="env_file"):
+        provision.validate_compose(f"services:\n  web:\n    image: x\n    env_file: {env_file}")
+
+
+def test_compose_allows_optional_env_file():
+    assert provision.validate_compose(
+        "services:\n  web:\n    image: x\n    env_file: [{path: a.env, required: false}]")
+
+
 def test_metadata_dhcp_has_no_network():
     """Templates the portal didn't build: cloud-init's own fallback, which works whatever
     renders their network."""
