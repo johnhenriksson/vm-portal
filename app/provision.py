@@ -42,6 +42,9 @@ class VMRequest:
     autostart: bool = True                      # start with its host
     backend_id: int | None = None               # the backend it goes on (backends.py)
     location: str | None = None                 # where on the backend (a Proxmox node); None = its default
+    # How the guest hands its first-boot result back, when the platform needs the guest's help
+    # (Platform.FIRSTBOOT_REPORT: "guestinfo" on vSphere). None: the platform reads it itself.
+    firstboot_report: str | None = None
     # A static IP's network, from the backend's pool settings (create() fills them in).
     ip_prefix: int = 24
     ip_gateway: str = ""
@@ -162,12 +165,17 @@ def with_network(req: VMRequest, b: backends.Backend) -> VMRequest:
     return replace(req, ip_prefix=b.cfg.ip_prefix, ip_gateway=b.cfg.ip_gateway, ip_dns=tuple(b.cfg.ip_dns))
 
 
+def prepared(req: VMRequest, b: backends.Backend) -> VMRequest:
+    """The request as the backend needs it: its network, and how the guest reports its first boot."""
+    return replace(with_network(req, b), firstboot_report=getattr(b.platform, "FIRSTBOOT_REPORT", None))
+
+
 def create(req: VMRequest, owner_id: int | None = None) -> int:
     """Record the VM and start a Terraform apply job. Returns the job id."""
     b = backends.get(req.backend_id)
     if b is None:
         raise ValueError("Choose a backend for the VM")
-    req = with_network(req, b)
+    req = prepared(req, b)
     pf = b.platform
     d = vm_dir(req.name)
     if d.exists():

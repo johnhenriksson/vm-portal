@@ -212,6 +212,18 @@ this per host, in the host's VM startup list, so:
 VMs from before this setting existed, and VMs imported from older backups,
 aren't managed: the page shows what the host says until someone saves a choice.
 
+### First-boot result
+
+The VM page shows whether cloud-init's first-boot setup (users, keys, the
+compose app) worked. vSphere can't read files in a guest without a login to it,
+so the VM reports this itself: cloud-init installs a one-shot service that runs
+after cloud-init finishes and puts a short summary into `guestinfo` with VMware
+Tools (the errors and, only if something failed, the last lines of
+`/var/log/cloud-init-output.log`). The portal reads it from the VM's advanced
+settings and then blanks it there, because anyone who may read the VM in vCenter
+could see those log lines. The VM needs no route to the portal. Templates without
+`open-vm-tools` show the result as unknown.
+
 ## Proxmox VE
 
 Tested on a single node running Proxmox VE 9.2: template builds of all three

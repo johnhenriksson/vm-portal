@@ -1,8 +1,10 @@
 """Whether a new VM's first-boot setup (cloud-init: users, keys, the compose app) worked.
 
 cloud-init writes its outcome to /run/cloud-init/result.json when it finishes. The portal
-reads that file through the backend (a platform's `first_boot`), never by having the guest
-call in, so VMs need no route to the portal and the portal no endpoint for them.
+gets it through the backend (a platform's `first_boot`), never by having the guest call in,
+so VMs need no route to the portal and the portal no endpoint for them. Proxmox VE reads the
+file with the guest agent; on vSphere the guest puts a summary into guestinfo itself
+(parse_report; the reporter is in guests/cloudinit.py).
 
 State, in the vms table (firstboot_state):
   NULL      not tracked (VMs from before this, other guests, platforms that can't read it)
@@ -17,6 +19,7 @@ a restart doesn't lose a VM that's mid-setup.
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -62,8 +65,46 @@ def parse_result(text: str) -> Result:
     return Result(ok=not errors, errors=[_clean(e, 500) for e in errors[:MAX_ERRORS]])
 
 
+REPORT_MAX = 64 * 1024     # what the portal accepts from a guest's own report
+
+
+def parse_report(text: str) -> Result:
+    """A guest's own report of its first boot (the vSphere reporter in guests/cloudinit.py):
+    {"v": 1, "errors": [...], "log": "..."}. The guest wrote it, so it's untrusted: capped,
+    cleaned, and only these fields are used."""
+    if len(text) > REPORT_MAX:
+        raise ValueError("The VM's first-boot report is too long")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise ValueError("The VM's first-boot report isn't valid JSON") from None
+    if not isinstance(data, dict) or data.get("v") != 1:
+        raise ValueError("The VM's first-boot report has an unknown format")
+    errors = data.get("errors") or []
+    if not isinstance(errors, list):
+        errors = [str(errors)]
+    r = Result(ok=not errors, errors=[_clean(e, 500) for e in errors[:MAX_ERRORS]])
+    if not r.ok and isinstance(data.get("log"), str):
+        r.log = log_excerpt(data["log"])
+    return r
+
+
 def tail(text: str, lines: int = LOG_LINES) -> str:
     return "\n".join(_clean(line, LINE_CHARS) for line in text.splitlines()[-lines:])
+
+
+# cloud-init's last line for a boot. Output after it isn't cloud-init's (Debian's SSH host
+# key generation lands there late) and would push the actual error out of the excerpt.
+FINISHED_RE = re.compile(r"^Cloud-init v\. \S+ finished at ")
+
+
+def log_excerpt(text: str, lines: int = LOG_LINES) -> str:
+    """The last lines of cloud-init's output log, up to where cloud-init said it finished."""
+    all_lines = text.splitlines()
+    ends = [i for i, line in enumerate(all_lines) if FINISHED_RE.match(line)]
+    if ends:
+        all_lines = all_lines[:ends[-1] + 1]
+    return tail("\n".join(all_lines), lines)
 
 
 # --- state -------------------------------------------------------------------------------

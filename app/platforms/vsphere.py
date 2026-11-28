@@ -595,6 +595,33 @@ def state_vm_id(state: dict) -> str | None:
     return None
 
 
+# --- first boot -------------------------------------------------------------------------
+# The guest reports its own first boot into guestinfo (guests/cloudinit.py); see firstboot.py.
+FIRSTBOOT_REPORT = "guestinfo"
+
+
+def first_boot(b, name: str, vm_id: str | None):
+    """cloud-init's outcome as the VM reported it (firstboot.Result), None while it hasn't.
+
+    The report is blanked once read: it can hold log lines, and anyone who may read the VM
+    in vCenter sees its advanced settings. The portal keeps the result in its database."""
+    from .. import firstboot
+    from ..guests.cloudinit import REPORT_KEY
+    st = _session(b)
+    with st.lock:
+        vm = _find_vm_locked(b, name, vm_id)
+        raw = next((str(o.value) for o in (vm.config.extraConfig or []) if o.key == REPORT_KEY), "")
+        if not raw:
+            return None
+        r = firstboot.parse_report(raw)
+        try:
+            spec = vim.vm.ConfigSpec(extraConfig=[vim.option.OptionValue(key=REPORT_KEY, value="")])
+            _wait(vm.ReconfigVM_Task(spec), timeout=60)
+        except Exception as e:  # noqa: BLE001 - the result stands; the next VM report overwrites it
+            log.warning("couldn't blank %s's first-boot report in vCenter: %s", name, e)
+    return r
+
+
 # What a create needs beyond OpenTofu: nothing on vSphere (cloud-init travels in guestinfo).
 async def before_create(b, req, d: Path, log) -> dict:
     return {}

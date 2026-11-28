@@ -738,7 +738,7 @@ def first_boot(b, name: str, vm_id: str | None):
         return None
     r = firstboot.parse_result(text)
     if not r.ok:
-        r.log = firstboot.tail(_agent_read(b, row, firstboot.OUTPUT_LOG) or "")
+        r.log = firstboot.log_excerpt(_agent_read(b, row, firstboot.OUTPUT_LOG) or "")
     return r
 
 
