@@ -19,7 +19,8 @@ sshkey --username=${username} ${jsonencode(key)}
 %{ endfor ~}
 
 selinux --enforcing
-firewall --enabled --service=ssh
+# SSH only: --service adds to the zone's defaults (cockpit, dhcpv6-client), so drop those.
+firewall --enabled --service=ssh --remove-service=cockpit --remove-service=dhcpv6-client
 # Both guest agents: each only runs on its own hypervisor. On Proxmox, Packer finds the
 # build VM's address through the QEMU agent, so it must come with the install.
 services --enabled=sshd,vmtoolsd,qemu-guest-agent
