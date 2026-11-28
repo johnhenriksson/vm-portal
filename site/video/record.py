@@ -236,12 +236,13 @@ def tour(d: Director) -> None:
     d.caption("Create a VM in a few clicks", "Pick an image, a size and an address")
     d.click("nav a[href='/vms/new']", nav=True)
     d.hold(0.6)
-    if long:
-        d.caption("vSphere and Proxmox VE, side by side", "Each backend has its own templates and addresses")
-        d.hold(0.5)
-        d.choose(".backend-picker select", PROXMOX_BACKEND)
-        d.hold(1.6)
-        d.caption("Pick an image, a size and an address", "The same form on every backend")
+    # The short cuts are narrow: the full line wraps and leaves "side" on its own.
+    d.caption("vSphere and Proxmox VE, side by side" if long else "vSphere and Proxmox VE",
+              "Each backend has its own templates and addresses")
+    d.hold(0.5 if long else 0.3)
+    d.choose(".backend-picker select", PROXMOX_BACKEND)
+    d.hold(1.6 if long else 1.1)
+    d.caption("Pick an image, a size and an address", "The same form on every backend")
     d.click("label.choice:has-text('Debian')", at=(0.3, 0.5))
     d.click("[data-slider=cpus] label.step:has-text('4 vCPU')")
     d.click("[data-slider=memory_mb] label.step:has-text('8GB')")
